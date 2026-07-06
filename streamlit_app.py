@@ -132,8 +132,11 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 .clock .d {{ color:{MUTED}; font-size:.74rem; margin-top:.18rem; }}
 .clock .upd {{ color:{ORANGE}; font-size:.68rem; margin-top:.35rem; }}
 
-/* single-board 3-column list */
-.rows {{ flex:0 0 auto; column-count:3; column-gap:1.5rem; margin-top:1.3rem; }}
+/* single-board: one full-width row per person */
+.rows {{ flex:0 0 auto; column-count:1; margin-top:1.3rem; }}
+.rows .row {{ padding:.8rem 1.1rem; }}
+.rows .row .name {{ flex:0 0 auto; max-width:42%; }}
+.rows .row .bar {{ flex:1 1 auto; }}
 
 /* split-screen: two panels */
 .split {{ flex:1 1 auto; display:flex; gap:1.8rem; margin-top:1.2rem; align-items:flex-start; }}
