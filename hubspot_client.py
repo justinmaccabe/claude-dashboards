@@ -108,12 +108,16 @@ class HubSpot:
 
     # -- generic search -----------------------------------------------------
     def search(self, filters: list, props: list) -> list:
-        """Return property dicts (each includes 'id') for all tickets matching the
-        AND of `filters`. Always includes assigned_to. Paginates fully."""
+        """Tickets matching the AND of `filters` (one filter group)."""
+        return self.search_groups([{"filters": filters}], props)
+
+    def search_groups(self, filter_groups: list, props: list) -> list:
+        """Tickets matching ANY filter group (groups are OR'd), each group's filters
+        AND'd. Always includes assigned_to + id. Paginates fully; deduped by HubSpot."""
         out, after = [], None
         want = list({*props, P["assigned_to"], "hs_object_id"})
         while True:
-            body = {"filterGroups": [{"filters": filters}], "properties": want, "limit": 100}
+            body = {"filterGroups": filter_groups, "properties": want, "limit": 100}
             if after:
                 body["after"] = after
             data = self._req("POST", "/crm/v3/objects/tickets/search", json=body)
@@ -124,6 +128,22 @@ class HubSpot:
             after = data.get("paging", {}).get("next", {}).get("after")
             if not after:
                 break
+        return out
+
+    def action_item_last_changed(self, ids: list) -> dict:
+        """{ticket_id: epoch_ms of the most recent action_item change} via the
+        batch-read-with-history API (100 ids/call). Reproduces HubSpot's
+        'Action Item (not) updated in the last N days' property-history filter."""
+        out = {}
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            body = {"propertiesWithHistory": ["action_item"],
+                    "inputs": [{"id": x} for x in chunk]}
+            data = self._req("POST", "/crm/v3/objects/tickets/batch/read", json=body)
+            for r in data.get("results", []):
+                hist = r.get("propertiesWithHistory", {}).get("action_item", [])
+                if hist:  # history is newest-first
+                    out[r.get("id")] = to_ms(hist[0].get("timestamp"))
         return out
 
 

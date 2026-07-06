@@ -57,60 +57,72 @@ def build_open_outside(hs: HubSpot):
     roster_ids = [name_to_id[n.casefold()] for n in SUPPORT_ROSTER if n.casefold() in name_to_id]
     exclude_ids = {name_to_id[n.casefold()] for n in OWNER_EXCLUDE if n.casefold() in name_to_id}
 
+    # Server-side: everything except the "outside SLA" (action-item-stale) test.
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["stage"], "operator": "NOT_IN", "values": [closed]},
         {"propertyName": P["action_item"], "operator": "IN",
          "values": ["Pending Action", "In Process", "Pending Confirmation"]},
-        # "Action Item not updated in the last 0 days" == last changed before today
-        {"propertyName": P["action_item_updated"], "operator": "LT", "value": start_of_today_ms()},
         {"propertyName": P["assigned_to"], "operator": "IN", "values": roster_ids},
     ]
-    rows = hs.search(filters, RETURN_PROPS)
-    result = {}
+    rows = hs.search(filters, RETURN_PROPS + [P["owner"]])
+    cand = []
     for r in rows:
         owner = r.get(P["owner"])
         if owner and str(owner) in exclude_ids:          # owner none of {Stephanie, Daniel}, empty OK
             continue
-        sub = (r.get(P["submitted_by"]) or "").lower()
-        if "daniel willett" in sub:                       # submitted by doesn't contain Daniel Willett
+        if "daniel willett" in (r.get(P["submitted_by"]) or "").lower():
             continue
-        result[r["id"]] = r.get(P["assigned_to"])
+        cand.append(r)
+
+    # "Outside SLA" == Action Item not updated today: keep tickets whose most recent
+    # action_item change was before the start of today (property-history filter).
+    today = start_of_today_ms()
+    last = hs.action_item_last_changed([r["id"] for r in cand])
+    result = {r["id"]: r.get(P["assigned_to"])
+              for r in cand
+              if (last.get(r["id"]) is not None and last[r["id"]] < today)}
     return _tally([{P["assigned_to"]: v, "id": k} for k, v in result.items()], id_to_name)
 
 
 # ---------------------------------------------------------------------------
 # Board B / C — Completed Last 7 Days (Outside / Within SLA)
 # ---------------------------------------------------------------------------
+TTFR_MS = 15 * 60 * 1000   # "15 minutes"; time_to_first_agent_reply is stored in ms
+
+
 def _completed_pending_action(hs, within: bool):
-    """2(f) within / 2(e) outside — Pending Action, SLA on time-to-first-reply (15m)."""
+    """2(f) within / 2(e) outside — Pending Action. SLA = time-to-first-reply vs 15m.
+    Attributed to assigned_to_processing (the rep who did the processing)."""
     pid, _ = hs.support_ids()
-    filters = [
+    cutoff = days_ago_ms(8)
+    common = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Action"]},
         {"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"},
     ]
-    rows = hs.search(filters, RETURN_PROPS)
-    cutoff = days_ago_ms(8)
+    # Window server-side as two OR'd groups to stay under the 10k cap.
+    groups = [
+        {"filters": common + [{"propertyName": P["create_date"], "operator": "GT", "value": cutoff}]},
+        {"filters": common + [{"propertyName": P["first_agent_response"], "operator": "GT", "value": cutoff}]},
+    ]
+    rows = hs.search_groups(groups, RETURN_PROPS + [P["assigned_to_processing"]])
     out = {}
     for r in rows:
-        # window: first agent response < 8 days ago OR create date < 8 days ago
-        far = to_ms(r.get(P["first_agent_response"]))
-        cre = to_ms(r.get(P["create_date"]))
-        if not ((far and far > cutoff) or (cre and cre > cutoff)):
-            continue
         ttfr = to_num(r.get(P["ttfr"]))
-        within_sla = ttfr is not None and ttfr <= 15
-        if within and not within_sla:
-            continue
-        if not within and within_sla:      # outside = not within (reply >15 or no reply)
-            continue
-        out[r["id"]] = r.get(P["assigned_to"])
+        if within:
+            if not (ttfr is not None and ttfr <= TTFR_MS):
+                continue
+        else:
+            if not (ttfr is not None and ttfr > TTFR_MS):
+                continue
+        out[r["id"]] = r.get(P["assigned_to_processing"])
     return out
 
 
 def _completed_in_process(hs, within: bool):
-    """2(h) within / 2(g) outside — In Process, SLA on Total Time In Process (240)."""
+    """2(h) within / 2(g) outside — In Process. SLA = Total Time In Process vs 240.
+    Attributed to assigned_to_support_ticket."""
     pid, _ = hs.support_ids()
     cutoff = days_ago_ms(8)
     filters = [
@@ -122,24 +134,22 @@ def _completed_in_process(hs, within: bool):
     ]
     if not within:  # 2(g) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS)
+    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_support_ticket"]])
     out = {}
     for r in rows:
         ttp = to_num(r.get(P["total_time_in_process"]))
         if ttp is None:
             continue
         within_sla = ttp <= 240
-        if within and not within_sla:
+        if within != within_sla:
             continue
-        if not within and within_sla:
-            continue
-        out[r["id"]] = r.get(P["assigned_to"])
+        out[r["id"]] = r.get(P["assigned_to_support_ticket"])
     return out
 
 
 def _completed_pending_conf(hs, within: bool):
-    """2(j) within / 2(i) outside — Pending Confirmation, SLA on Total Time in
-    Pending Confirmation (15)."""
+    """2(j) within / 2(i) outside — Pending Confirmation. SLA = Total Time in Pending
+    Confirmation vs 15. Attributed to assigned_to_final_review."""
     pid, _ = hs.support_ids()
     cutoff = days_ago_ms(8)
     filters = [
@@ -150,18 +160,17 @@ def _completed_pending_conf(hs, within: bool):
     ]
     if within:  # 2(j) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS)
+    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
     out = {}
     for r in rows:
         ttc = to_num(r.get(P["total_time_pending_conf"]))
         if ttc is None:
             continue
         within_sla = ttc <= 15
-        if within and not within_sla:
+        if within != within_sla:
             continue
-        if not within and within_sla:
-            continue
-        out[r["id"]] = r.get(P["assigned_to"])
+        out[r["id"]] = (r.get(P["assigned_to_final_review"])
+                        or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"]))
     return out
 
 
@@ -172,7 +181,13 @@ def build_completed(hs: HubSpot, within: bool):
         _completed_in_process(hs, within),
         _completed_pending_conf(hs, within),
     )
-    return _tally([{P["assigned_to"]: v, "id": k} for k, v in merged.items()], id_to_name)
+    counts = {}
+    for oid in merged.values():
+        if not oid:
+            continue
+        name = id_to_name.get(str(oid), str(oid))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------
