@@ -32,6 +32,7 @@ P = {
     "assigned_to_processing": "assigned_to_processing",
     "assigned_to_support_ticket": "assigned_to_support_ticket",
     "assigned_to_final_review": "assigned_to_final_review",
+    "in_process_reason": "support_ticket__in_process_reason",
     "date_entered_in_process": "date_entered_in_process_support_ticket",           # calc=False
     "date_exited_pending_conf": "date_exited_pending_confirmation_support_ticket",  # calc=False
     "ttfr": "time_to_first_agent_reply",               # number, calc=False (minutes)
@@ -56,6 +57,7 @@ class HubSpot:
                                "Content-Type": "application/json"})
         self._owner_cache = None
         self._pipeline_cache = None
+        self._seg_cache = None
 
     def _req(self, method, path, **kw):
         for attempt in range(5):
@@ -128,6 +130,46 @@ class HubSpot:
             after = data.get("paging", {}).get("next", {}).get("after")
             if not after:
                 break
+        return out
+
+    # -- segments / lists ---------------------------------------------------
+    def sla_segments(self) -> dict:
+        """Resolve the 'Outside SLA - <stage> (Support Tickets)' ticket segments
+        by name -> {stage: listId}. Looked up by name so it survives list-id
+        changes. Cached per client."""
+        if self._seg_cache is not None:
+            return self._seg_cache
+        data = self._req("POST", "/crm/v3/lists/search", json={"query": "Outside SLA", "count": 100})
+        seg = {}
+        for l in data.get("lists", []):
+            name = l.get("name") or ""
+            if l.get("objectTypeId") == "0-5" and "Outside SLA" in name and "Support Tickets" in name:
+                for stage in ("Pending Action", "In Process", "Pending Confirmation"):
+                    if stage in name:
+                        seg[stage] = l.get("listId")
+        self._seg_cache = seg
+        return seg
+
+    def list_members(self, list_id) -> list:
+        """All ticket record ids in a list/segment (paginated)."""
+        ids, after = [], None
+        while True:
+            path = f"/crm/v3/lists/{list_id}/memberships?limit=250" + (f"&after={after}" if after else "")
+            data = self._req("GET", path)
+            ids += [r["recordId"] for r in data.get("results", [])]
+            after = data.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
+        return ids
+
+    def batch_read(self, ids: list, props: list) -> dict:
+        """{ticket_id: {prop: value}} via batch read (100 ids/call)."""
+        out = {}
+        for i in range(0, len(ids), 100):
+            body = {"properties": props, "inputs": [{"id": x} for x in ids[i:i + 100]]}
+            data = self._req("POST", "/crm/v3/objects/tickets/batch/read", json=body)
+            for r in data.get("results", []):
+                out[r["id"]] = r.get("properties", {})
         return out
 
     def action_item_last_changed(self, ids: list) -> dict:

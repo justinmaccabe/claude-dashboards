@@ -52,37 +52,38 @@ def _union(*subresults):
 # Board A — Open Support Tickets - Outside SLA (2b+2c+2d)
 # ---------------------------------------------------------------------------
 def build_open_outside(hs: HubSpot):
+    """2(b)+2(c)+2(d): union of the 'Outside SLA - <stage> (Support Tickets)'
+    segments, minus the report's exclusion filters, tallied by assigned_to. The
+    segments carry the outside-SLA logic, so this tracks the report as its criteria
+    evolve. No hard-coded roster — the report dropped it."""
     id_to_name, name_to_id = hs.owner_maps()
-    pid, closed = hs.support_ids()
-    roster_ids = [name_to_id[n.casefold()] for n in SUPPORT_ROSTER if n.casefold() in name_to_id]
+    _, closed = hs.support_ids()
     exclude_ids = {name_to_id[n.casefold()] for n in OWNER_EXCLUDE if n.casefold() in name_to_id}
 
-    # Server-side: everything except the "outside SLA" (action-item-stale) test.
-    filters = [
-        {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
-        {"propertyName": P["stage"], "operator": "NOT_IN", "values": [closed]},
-        {"propertyName": P["action_item"], "operator": "IN",
-         "values": ["Pending Action", "In Process", "Pending Confirmation"]},
-        {"propertyName": P["assigned_to"], "operator": "IN", "values": roster_ids},
-    ]
-    rows = hs.search(filters, RETURN_PROPS + [P["owner"]])
-    cand = []
-    for r in rows:
-        owner = r.get(P["owner"])
-        if owner and str(owner) in exclude_ids:          # owner none of {Stephanie, Daniel}, empty OK
+    seg = hs.sla_segments()
+    ids = set()
+    for list_id in seg.values():
+        ids.update(hs.list_members(list_id))
+    props = hs.batch_read(list(ids), [P["assigned_to"], P["owner"], P["stage"],
+                                       P["submitted_by"], P["in_process_reason"]])
+    counts = {}
+    for p in props.values():
+        if p.get(P["stage"]) == closed:                       # status ≠ Closed
             continue
-        if "daniel willett" in (r.get(P["submitted_by"]) or "").lower():
+        owner = p.get(P["owner"])
+        if owner and str(owner) in exclude_ids:               # owner ∉ {Stephanie, Daniel}, empty OK
             continue
-        cand.append(r)
-
-    # "Outside SLA" == Action Item not updated today: keep tickets whose most recent
-    # action_item change was before the start of today (property-history filter).
-    today = start_of_today_ms()
-    last = hs.action_item_last_changed([r["id"] for r in cand])
-    result = {r["id"]: r.get(P["assigned_to"])
-              for r in cand
-              if (last.get(r["id"]) is not None and last[r["id"]] < today)}
-    return _tally([{P["assigned_to"]: v, "id": k} for k, v in result.items()], id_to_name)
+        if "daniel willett" in (p.get(P["submitted_by"]) or "").lower():
+            continue
+        reason = (p.get(P["in_process_reason"]) or "").lower()
+        if "nbin" in reason or "custodian" in reason:         # In Process Reason ∌ NBIN/Custodian
+            continue
+        a = p.get(P["assigned_to"])
+        if not a:
+            continue
+        name = id_to_name.get(str(a), str(a))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------
