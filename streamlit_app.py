@@ -1,9 +1,10 @@
 """Claude ops dashboards — Support-team leaderboards for the office TVs.
 
-One app, three boards selected by ?report= :
-  ?report=open-outside        Open Support Tickets Outside SLA        (2b+2c+2d)
-  ?report=completed-outside    Tickets Completed Last 7 Days - Outside SLA  (2e+2g+2i)
-  ?report=completed-within     Tickets Completed Last 7 Days - Within SLA   (2f+2h+2j)
+Boards selected by ?report= :
+  open-outside        Open Support Tickets Outside SLA             (2b+2c+2d)
+  completed-outside    Tickets Completed Last 7 Days - Outside SLA  (2e+2g+2i)
+  completed-within     Tickets Completed Last 7 Days - Within SLA   (2f+2h+2j)
+  completed-both       Split screen: Outside | Within, side by side
 
 Queries HubSpot live (cached 15 min) via reports.py, most-on-top, only people with
 counts. Same Optimize Advisor Portal styling as the SLA board.
@@ -21,17 +22,37 @@ import reports
 TZ = ZoneInfo("America/Toronto")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# --- which board? ----------------------------------------------------------
+NAVY = "#2B3A4E"
+NAVY_LINE = "rgba(255,255,255,.07)"
+ORANGE = "#C97B30"
+TEAL = "#5E8A7E"
+INK = "#FFFFFF"
+MUTED = "#9CB0C2"
+
+# Combined (split-screen) views compose two single boards side by side.
+COMBINED = {
+    "completed-both": {
+        "title": "Tickets Completed This Week",
+        "label": "Advisor Support · Service Delivery",
+        "panels": [("completed-outside", "Outside SLA", "warn"),
+                   ("completed-within", "Within SLA", "good")],
+    },
+}
+
+
 def _report_key():
     try:
         k = st.query_params.get("report")
     except Exception:
         k = None
-    return k if k in reports.REPORTS else reports.DEFAULT_REPORT
+    if k in reports.REPORTS or k in COMBINED:
+        return k
+    return reports.DEFAULT_REPORT
 
 
 KEY = _report_key()
-CFG = reports.REPORTS[KEY]
+IS_COMBINED = KEY in COMBINED
+CFG = COMBINED[KEY] if IS_COMBINED else reports.REPORTS[KEY]
 
 st.set_page_config(page_title=f"{CFG['title']} — Optimize", page_icon="◆",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -41,13 +62,6 @@ try:
     st_autorefresh(interval=60_000, key="tick")
 except Exception:
     pass
-
-NAVY = "#2B3A4E"
-NAVY_LINE = "rgba(255,255,255,.07)"
-ORANGE = "#C97B30"
-TEAL = "#5E8A7E"
-INK = "#FFFFFF"
-MUTED = "#9CB0C2"
 
 
 def _token():
@@ -117,55 +131,97 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 .clock .t {{ font-family:'Lora',serif; font-size:1.6rem; line-height:1; }}
 .clock .d {{ color:{MUTED}; font-size:.74rem; margin-top:.18rem; }}
 .clock .upd {{ color:{ORANGE}; font-size:.68rem; margin-top:.35rem; }}
+
+/* single-board 3-column list */
 .rows {{ flex:0 0 auto; column-count:3; column-gap:1.5rem; margin-top:1.3rem; }}
+
+/* split-screen: two panels */
+.split {{ flex:1 1 auto; display:flex; gap:1.8rem; margin-top:1.2rem; align-items:flex-start; }}
+.panel {{ flex:1 1 0; min-width:0; }}
+.ptitle {{ font-family:'Lora',serif; font-size:1.2rem; font-weight:600; color:{INK};
+           display:flex; justify-content:space-between; align-items:baseline;
+           border-bottom:2px solid rgba(255,255,255,.15); padding-bottom:.45rem; margin-bottom:.75rem; }}
+.ptitle .pc {{ font-size:1.5rem; }}
+.ptitle.warn {{ border-bottom-color:{ORANGE}; }} .ptitle.warn .pc {{ color:{ORANGE}; }}
+.ptitle.good {{ border-bottom-color:{TEAL}; }} .ptitle.good .pc {{ color:{TEAL}; }}
+.rows2 {{ column-count:1; }}
+
 .row {{ break-inside:avoid; display:flex; align-items:center; gap:.6rem; background:rgba(255,255,255,.05);
         border-radius:11px; padding:.6rem .85rem; margin-bottom:.6rem; border-left:3px solid transparent; }}
 .row.top {{ border-left-color:{ORANGE}; background:rgba(201,123,48,.12); }}
+.good .row.top {{ border-left-color:{TEAL}; background:rgba(94,138,126,.14); }}
 .row .rank {{ flex:0 0 1.9rem; font-family:'Lora',serif; font-size:1.3rem; color:{MUTED}; text-align:right; }}
-.row.top .rank {{ color:{ORANGE}; }}
+.row.top .rank {{ color:{ORANGE}; }} .good .row.top .rank {{ color:{TEAL}; }}
 .row .name {{ flex:1 1 auto; min-width:0; font-size:1.35rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.row .bar {{ flex:0 0 100px; height:14px; border-radius:7px; background:rgba(255,255,255,.08); overflow:hidden; }}
+.row .bar {{ flex:0 0 90px; height:14px; border-radius:7px; background:rgba(255,255,255,.08); overflow:hidden; }}
 .row .bar i {{ display:block; height:100%; border-radius:7px; }}
 .row .n {{ flex:0 0 2.7rem; text-align:right; font-family:'Lora',serif; font-weight:700; font-size:1.7rem; }}
 .foot {{ flex:0 0 auto; margin-top:auto; display:flex; justify-content:space-between; align-items:center;
          padding-top:.8rem; border-top:1px solid rgba(255,255,255,.12); color:{MUTED}; font-size:.84rem; }}
 .foot b {{ color:{INK}; }}
 .foot .big {{ font-family:'Lora',serif; color:{ORANGE}; font-size:1.5rem; vertical-align:-2px; }}
+.foot .gbig {{ font-family:'Lora',serif; color:{TEAL}; font-size:1.5rem; vertical-align:-2px; }}
 .empty {{ flex:1 1 auto; display:flex; align-items:center; justify-content:center; color:{MUTED}; font-size:1.1rem; }}
+.pempty {{ color:{MUTED}; padding:.6rem .2rem; }}
 </style>
 """, unsafe_allow_html=True)
 
 
-def bar_color(n, mx):
+def bar_color(n, mx, tone):
     frac = (n / mx) if mx else 0
-    if frac >= 0.45:
-        return "#B85C2A"
-    if frac >= 0.15:
-        return ORANGE
-    return "#D8A65E"
+    if tone == "good":
+        return "#4E7A6E" if frac >= 0.45 else (TEAL if frac >= 0.15 else "#8FB3A8")
+    return "#B85C2A" if frac >= 0.45 else (ORANGE if frac >= 0.15 else "#D8A65E")
+
+
+def rows_html(df, tone):
+    if df.empty:
+        return '<div class="pempty">No tickets in this view right now ✓</div>'
+    mx = int(df["tickets"].max())
+    out, rank, last_n = [], 0, None
+    for i, r in df.iterrows():
+        n = int(r["tickets"])
+        if n != last_n:
+            rank = i + 1
+            last_n = n
+        width = max((n / mx) * 100, 3)
+        cls = "row top" if rank <= 3 else "row"
+        out.append(f'<div class="{cls}"><div class="rank">{rank}</div>'
+                   f'<div class="name">{r["person"]}</div>'
+                   f'<div class="bar"><i style="width:{width:.0f}%;background:{bar_color(n, mx, tone)}"></i></div>'
+                   f'<div class="n">{n}</div></div>')
+    return "".join(out)
+
+
+def fetch_df(key, tok):
+    counts, captured = _fetch(key, tok[-8:])
+    df = (pd.DataFrame(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
+                       columns=["person", "tickets"])
+          if counts else pd.DataFrame(columns=["person", "tickets"]))
+    return df, captured
 
 
 # --- data ------------------------------------------------------------------
 now = dt.datetime.now(TZ)
-counts, captured, err = {}, None, None
 tok = _token()
-if not tok:
-    err = "No HUBSPOT_TOKEN configured"
-else:
+err = None if tok else "No HUBSPOT_TOKEN configured"
+captured = None
+panels = []   # list of (subtitle, tone, df) ; single board uses one entry with subtitle None
+if not err:
     try:
-        counts, captured = _fetch(KEY, tok[-8:])
+        if IS_COMBINED:
+            for pkey, sub, tone in CFG["panels"]:
+                df, c = fetch_df(pkey, tok)
+                panels.append((sub, tone, df))
+                captured = captured or c
+        else:
+            tone = "good" if "within" in KEY else "warn"
+            df, captured = fetch_df(KEY, tok)
+            panels = [(None, tone, df)]
     except Exception as e:
         err = str(e)
 
-df = (pd.DataFrame(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
-                   columns=["person", "tickets"])
-      if counts else pd.DataFrame(columns=["person", "tickets"]))
-total = int(df["tickets"].sum()) if not df.empty else 0
-mx = int(df["tickets"].max()) if not df.empty else 0
-
-updated_txt = "—"
-if captured is not None:
-    updated_txt = captured.astimezone(TZ).strftime("%-I:%M %p")
+updated_txt = captured.astimezone(TZ).strftime("%-I:%M %p") if captured is not None else "—"
 
 # --- header ----------------------------------------------------------------
 html = ['<div class="board">']
@@ -179,30 +235,32 @@ html.append(f"""
 </div></div>
 """)
 
+# --- body ------------------------------------------------------------------
 if err:
     html.append(f'<div class="empty">Waiting on data — {err}</div>')
-elif df.empty:
-    html.append('<div class="empty">No tickets in this view right now ✓</div>')
-else:
-    html.append('<div class="rows">')
-    rank, last_n = 0, None
-    for i, r in df.iterrows():
-        n = int(r["tickets"])
-        if n != last_n:
-            rank = i + 1
-            last_n = n
-        width = max((n / mx) * 100, 3) if mx else 0
-        cls = "row top" if rank <= 3 else "row"
-        html.append(f'<div class="{cls}"><div class="rank">{rank}</div>'
-                     f'<div class="name">{r["person"]}</div>'
-                     f'<div class="bar"><i style="width:{width:.0f}%;background:{bar_color(n, mx)}"></i></div>'
-                     f'<div class="n">{n}</div></div>')
+elif IS_COMBINED:
+    html.append('<div class="split">')
+    for sub, tone, df in panels:
+        total = int(df["tickets"].sum()) if not df.empty else 0
+        html.append(f'<div class="panel"><div class="ptitle {tone}">{sub}'
+                     f'<span class="pc">{total}</span></div>'
+                     f'<div class="rows2 {tone}">{rows_html(df, tone)}</div></div>')
     html.append('</div>')
-
-html.append(f"""
+    foot_right = " &nbsp;·&nbsp; ".join(
+        f'<span class="{"gbig" if tone == "good" else "big"}">{int(df["tickets"].sum()) if not df.empty else 0}</span> {sub.lower()}'
+        for sub, tone, df in panels)
+    html.append(f'<div class="foot"><div>If broken, contact Justin Maccabe</div><div>{foot_right}</div></div>')
+else:
+    sub, tone, df = panels[0]
+    total = int(df["tickets"].sum()) if not df.empty else 0
+    if df.empty:
+        html.append('<div class="empty">No tickets in this view right now ✓</div>')
+    else:
+        html.append(f'<div class="rows">{rows_html(df, tone)}</div>')
+    html.append(f"""
 <div class="foot"><div>If broken, contact Justin Maccabe</div>
 <div><span class="big">{total}</span> tickets &nbsp;·&nbsp; <b>{len(df)}</b> people</div></div>""")
-html.append('</div>')
 
+html.append('</div>')
 final_html = "\n".join(line.lstrip() for line in "\n".join(html).splitlines())
 st.markdown(final_html, unsafe_allow_html=True)
