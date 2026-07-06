@@ -63,6 +63,16 @@ try:
 except Exception:
     pass
 
+# Belt-and-suspenders: a plain-JS full-page reload every 15 min, independent of the
+# autorefresh component. Guarantees the board (and its data) refreshes on the TV even
+# if the component fails to load, and wakes a lightly-idle app.
+import streamlit.components.v1 as components  # noqa: E402
+components.html(
+    "<script>setTimeout(function(){try{window.parent.location.reload();}"
+    "catch(e){window.location.reload();}}, 900000);</script>",
+    height=0,
+)
+
 
 def _token():
     tok = os.environ.get("HUBSPOT_TOKEN")
@@ -74,9 +84,9 @@ def _token():
     return tok
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _fetch(report_key: str, _tok_tail: str):
-    """Query HubSpot at most once per 15 min per board. Returns (counts, fetched_at)."""
+    """Query HubSpot at most once per 5 min per board. Returns (counts, fetched_at)."""
     from hubspot_client import HubSpot
     counts = reports.REPORTS[report_key]["build"](HubSpot(token=_token()))
     return counts, dt.datetime.now(dt.timezone.utc)
