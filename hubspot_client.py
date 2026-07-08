@@ -34,7 +34,9 @@ P = {
     "assigned_to_final_review": "assigned_to_final_review",
     "in_process_reason": "support_ticket__in_process_reason",
     "date_entered_in_process": "date_entered_in_process_support_ticket",           # calc=False
+    "date_exited_in_process": "date_exited_in_process_support_ticket",             # calc=False
     "date_exited_pending_conf": "date_exited_pending_confirmation_support_ticket",  # calc=False
+    "date_entered_pending_action": "date_entered_in_process_pending_action",       # calc=False
     "ttfr": "time_to_first_agent_reply",               # number, calc=False (minutes)
     "create_date": "createdate",
     # calculated (calc=True) — must be read + filtered client-side:
@@ -198,6 +200,15 @@ def start_of_today_ms() -> int:
 def days_ago_ms(days: int) -> int:
     d = dt.datetime.now(TZ) - dt.timedelta(days=days)
     return int(d.astimezone(dt.timezone.utc).timestamp() * 1000)
+
+
+def today_bounds_ms():
+    """(start_of_today, start_of_tomorrow) in epoch ms, America/Toronto — for
+    '<date> is Today' filters (value >= start AND value < end)."""
+    start = dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + dt.timedelta(days=1)
+    return (int(start.astimezone(dt.timezone.utc).timestamp() * 1000),
+            int(end.astimezone(dt.timezone.utc).timestamp() * 1000))
 
 
 def to_ms(v):

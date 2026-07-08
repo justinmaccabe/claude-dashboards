@@ -10,7 +10,8 @@ ticket id (so a ticket counted in two sub-reports counts once) and tally per own
 """
 from __future__ import annotations
 
-from hubspot_client import HubSpot, P, start_of_today_ms, days_ago_ms, to_ms, to_num
+from hubspot_client import (HubSpot, P, start_of_today_ms, days_ago_ms,
+                            today_bounds_ms, to_ms, to_num)
 
 # Board A restricts to this 10-person support roster (report 2b/c/d filter 5).
 SUPPORT_ROSTER = [
@@ -192,6 +193,108 @@ def build_completed(hs: HubSpot, within: bool):
 
 
 # ---------------------------------------------------------------------------
+# Completed TODAY (2k/2l In Process, 2m/2n Pending Confirmation, 2e/2f Pending
+# Action's today row). Same shape as the 7-day boards but keyed off
+# "Date <Entered/Exited> <stage> is Today"; In-Process SLA splits at 15 (not 240).
+# ---------------------------------------------------------------------------
+def _today_pending_action(hs, within: bool):
+    """2(e)/2(f) 'today' row — Pending Action entered today. Attributed to
+    assigned_to_processing; SLA on time-to-first-reply vs 15m."""
+    pid, _ = hs.support_ids()
+    t0, t1 = today_bounds_ms()
+    filters = [
+        {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
+        {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Action"]},
+        {"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"},
+        # "completed pending action today" == entered the next stage (In Process) today
+        {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
+    ]
+    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_processing"]])
+    out = {}
+    for r in rows:
+        ttfr = to_num(r.get(P["ttfr"]))
+        within_sla = ttfr is not None and ttfr <= TTFR_MS
+        if within != within_sla:
+            continue
+        out[r["id"]] = r.get(P["assigned_to_processing"])
+    return out
+
+
+def _today_in_process(hs, within: bool):
+    """2(k)/2(l) — In Process exited today. Attributed to assigned_to_support_ticket;
+    SLA on Total Time In Process vs 15."""
+    pid, _ = hs.support_ids()
+    t0, t1 = today_bounds_ms()
+    _, name_to_id = hs.owner_maps()
+    daniel = name_to_id.get("daniel willett")
+    filters = [
+        {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
+        {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["In Process"]},
+        {"propertyName": P["assigned_to_support_ticket"], "operator": "HAS_PROPERTY"},
+        {"propertyName": P["date_exited_in_process"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_exited_in_process"], "operator": "LT", "value": t1},
+    ]
+    if not within:  # 2(k) also requires assigned_to_processing known
+        filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
+    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_support_ticket"], P["owner"],
+                                              P["in_process_reason"]])
+    out = {}
+    for r in rows:
+        ttp = to_num(r.get(P["total_time_in_process"]))
+        if ttp is None or (ttp <= 15) != within:
+            continue
+        if daniel and str(r.get(P["owner"])) == daniel:          # owner ≠ Daniel Willett
+            continue
+        if not within:                                            # 2(k): reason ∌ nbin/custodian
+            rz = (r.get(P["in_process_reason"]) or "").lower()
+            if "nbin" in rz or "custodian" in rz:
+                continue
+        out[r["id"]] = r.get(P["assigned_to_support_ticket"])
+    return out
+
+
+def _today_pending_conf(hs, within: bool):
+    """2(m)/2(n) — Pending Confirmation exited today. Attributed to
+    assigned_to_final_review; SLA on Total Time in Pending Confirmation vs 15."""
+    pid, _ = hs.support_ids()
+    t0, t1 = today_bounds_ms()
+    filters = [
+        {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
+        {"propertyName": P["action_item"], "operator": "IN", "values": ["Completed"]},
+        {"propertyName": P["date_exited_pending_conf"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_exited_pending_conf"], "operator": "LT", "value": t1},
+    ]
+    if within:  # 2(n) requires assigned_to_final_review known
+        filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
+    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
+    out = {}
+    for r in rows:
+        ttc = to_num(r.get(P["total_time_pending_conf"]))
+        if ttc is None or (ttc <= 15) != within:
+            continue
+        out[r["id"]] = (r.get(P["assigned_to_final_review"])
+                        or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"]))
+    return out
+
+
+def build_today(hs: HubSpot, within: bool):
+    id_to_name, _ = hs.owner_maps()
+    merged = _union(
+        _today_pending_action(hs, within),
+        _today_in_process(hs, within),
+        _today_pending_conf(hs, within),
+    )
+    counts = {}
+    for oid in merged.values():
+        if not oid:
+            continue
+        name = id_to_name.get(str(oid), str(oid))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 REPORTS = {
@@ -209,6 +312,16 @@ REPORTS = {
         "title": "Tickets Completed Last 7 Days — Within SLA",
         "label": "Advisor Support · Service Delivery",
         "build": lambda hs: build_completed(hs, within=True),
+    },
+    "today-outside": {
+        "title": "Tickets Completed Today — Outside SLA",
+        "label": "Advisor Support · Service Delivery",
+        "build": lambda hs: build_today(hs, within=False),
+    },
+    "today-within": {
+        "title": "Tickets Completed Today — Within SLA",
+        "label": "Advisor Support · Service Delivery",
+        "build": lambda hs: build_today(hs, within=True),
     },
 }
 DEFAULT_REPORT = "open-outside"

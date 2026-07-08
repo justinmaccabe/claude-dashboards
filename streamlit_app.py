@@ -37,6 +37,12 @@ COMBINED = {
         "panels": [("completed-outside", "Outside SLA", "warn"),
                    ("completed-within", "Within SLA", "good")],
     },
+    "today-both": {
+        "title": "Tickets Completed Today",
+        "label": "Advisor Support · Service Delivery",
+        "panels": [("today-outside", "Outside SLA", "warn"),
+                   ("today-within", "Within SLA", "good")],
+    },
 }
 
 
