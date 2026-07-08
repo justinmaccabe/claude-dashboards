@@ -176,20 +176,27 @@ def _completed_pending_conf(hs, within: bool):
     return out
 
 
-def build_completed(hs: HubSpot, within: bool):
+def _sum_per_person(hs, subresults):
+    """SUM per-person counts across sub-reports (a ticket that completes several
+    stages counts once per report, crediting each stage's assignee) — matches
+    summing the CRM reports, not de-duping tickets."""
     id_to_name, _ = hs.owner_maps()
-    merged = _union(
+    counts = {}
+    for sr in subresults:
+        for oid in sr.values():
+            if not oid:
+                continue
+            name = id_to_name.get(str(oid), str(oid))
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def build_completed(hs: HubSpot, within: bool):
+    return _sum_per_person(hs, [
         _completed_pending_action(hs, within),
         _completed_in_process(hs, within),
         _completed_pending_conf(hs, within),
-    )
-    counts = {}
-    for oid in merged.values():
-        if not oid:
-            continue
-        name = id_to_name.get(str(oid), str(oid))
-        counts[name] = counts.get(name, 0) + 1
-    return counts
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -279,19 +286,11 @@ def _today_pending_conf(hs, within: bool):
 
 
 def build_today(hs: HubSpot, within: bool):
-    id_to_name, _ = hs.owner_maps()
-    merged = _union(
+    return _sum_per_person(hs, [
         _today_pending_action(hs, within),
         _today_in_process(hs, within),
         _today_pending_conf(hs, within),
-    )
-    counts = {}
-    for oid in merged.values():
-        if not oid:
-            continue
-        name = id_to_name.get(str(oid), str(oid))
-        counts[name] = counts.get(name, 0) + 1
-    return counts
+    ])
 
 
 # ---------------------------------------------------------------------------
