@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import sys
 import time
 from zoneinfo import ZoneInfo
 
@@ -117,20 +118,36 @@ class HubSpot:
 
     def search_groups(self, filter_groups: list, props: list) -> list:
         """Tickets matching ANY filter group (groups are OR'd), each group's filters
-        AND'd. Always includes assigned_to + id. Paginates fully; deduped by HubSpot."""
-        out, after = [], None
+        AND'd. Always includes assigned_to + id. Paginates fully.
+
+        A stable ``sorts`` (hs_object_id ascending) is REQUIRED for correct paging:
+        without it HubSpot's page order is undefined and, because these tickets are
+        being modified live, records can shift between page fetches and be duplicated
+        or skipped — the source of intermittent miscounts. With a fixed sort the
+        cursor is deterministic. We also guard the Search API's hard 10k-result cap
+        so silent truncation surfaces in the logs instead of quietly undercounting."""
+        out, after, seen = [], None, set()
         want = list({*props, P["assigned_to"], "hs_object_id"})
         while True:
-            body = {"filterGroups": filter_groups, "properties": want, "limit": 100}
+            body = {"filterGroups": filter_groups, "properties": want, "limit": 100,
+                    "sorts": [{"propertyName": "hs_object_id", "direction": "ASCENDING"}]}
             if after:
                 body["after"] = after
             data = self._req("POST", "/crm/v3/objects/tickets/search", json=body)
             for t in data.get("results", []):
+                tid = t.get("id")
+                if tid in seen:                       # belt-and-suspenders de-dupe
+                    continue
+                seen.add(tid)
                 row = dict(t.get("properties", {}))
-                row["id"] = t.get("id")
+                row["id"] = tid
                 out.append(row)
             after = data.get("paging", {}).get("next", {}).get("after")
             if not after:
+                break
+            if len(out) >= 10000:                     # HubSpot Search hard cap
+                print("[dash][WARN] search hit the 10,000-result cap — results "
+                      f"truncated; filters={filter_groups}", file=sys.stderr)
                 break
         return out
 

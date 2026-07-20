@@ -10,8 +10,51 @@ ticket id (so a ticket counted in two sub-reports counts once) and tally per own
 """
 from __future__ import annotations
 
-from hubspot_client import (HubSpot, P, start_of_today_ms, days_ago_ms,
-                            today_bounds_ms, to_ms, to_num)
+import sys
+
+from hubspot_client import HubSpot, P, days_ago_ms, today_bounds_ms, to_num
+
+
+def _authoritative(hs, ids, prop):
+    """Authoritative value of a (calculated / lazily-computed) property via
+    batch/read: {id: float|None}.
+
+    The SLA split relies on calculated properties (time_to_first_agent_reply,
+    total_time_in_process_*, total_time_in_pending_confirmation_*). Read inline from
+    the Search response these are computed lazily and can come back null or stale,
+    which silently dropped or mis-bucketed tickets — the cause of the intermittent
+    miscounts. batch/read forces HubSpot to return the computed value, so the
+    classification is deterministic regardless of index/search timing."""
+    if not ids:
+        return {}
+    got = hs.batch_read(list(ids), [prop])
+    return {tid: to_num(p.get(prop)) for tid, p in got.items()}
+
+
+def _classify(rows, metric, threshold, within, owner_of, *, keep=None, tag=""):
+    """Shared SLA split. `metric` = {id: value|None}. A ticket is WITHIN when its
+    value <= threshold, OUTSIDE when > threshold. A ticket with NO value is
+    **unclassifiable** — excluded from BOTH sides (never guessed into one) and
+    logged, so it can neither be silently dropped nor wrongly inflate a side.
+    `keep(row)` is an optional extra predicate (per-report exclusions)."""
+    out, unclassified = {}, 0
+    for r in rows:
+        v = metric.get(r["id"])
+        if v is None:
+            unclassified += 1
+            continue
+        if (v <= threshold) != within:
+            continue
+        if keep and not keep(r):
+            continue
+        oid = owner_of(r)
+        if oid:
+            out[r["id"]] = oid
+    if unclassified:
+        print(f"[dash] {tag} ({'within' if within else 'outside'}): "
+              f"{unclassified} ticket(s) had no metric value and were excluded",
+              file=sys.stderr)
+    return out
 
 # Board A restricts to this 10-person support roster (report 2b/c/d filter 5).
 SUPPORT_ROSTER = [
@@ -20,33 +63,6 @@ SUPPORT_ROSTER = [
     "Adam Goldband", "Gabriel Tan",
 ]
 OWNER_EXCLUDE = ["Stephanie Hunter", "Daniel Willett"]
-
-# Common return properties (superset; harmless to over-request).
-RETURN_PROPS = [
-    P["assigned_to"], P["submitted_by"], P["ttfr"], P["create_date"],
-    P["first_agent_response"], P["total_time_in_process"],
-    P["total_time_pending_conf"], P["action_item"],
-]
-
-
-def _tally(rows, id_to_name):
-    """rows -> {name: count}, attributing by assigned_to owner id, deduped by ticket."""
-    counts = {}
-    for r in rows:
-        oid = r.get(P["assigned_to"])
-        if not oid:
-            continue
-        name = id_to_name.get(str(oid), str(oid))
-        counts[name] = counts.get(name, 0) + 1
-    return counts
-
-
-def _union(*subresults):
-    """Merge {ticket_id: owner_id} dicts (union by ticket id)."""
-    merged = {}
-    for sr in subresults:
-        merged.update(sr)
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -108,18 +124,10 @@ def _completed_pending_action(hs, within: bool):
         {"filters": common + [{"propertyName": P["create_date"], "operator": "GT", "value": cutoff}]},
         {"filters": common + [{"propertyName": P["first_agent_response"], "operator": "GT", "value": cutoff}]},
     ]
-    rows = hs.search_groups(groups, RETURN_PROPS + [P["assigned_to_processing"]])
-    out = {}
-    for r in rows:
-        ttfr = to_num(r.get(P["ttfr"]))
-        if within:
-            if not (ttfr is not None and ttfr <= TTFR_MS):
-                continue
-        else:
-            if not (ttfr is not None and ttfr > TTFR_MS):
-                continue
-        out[r["id"]] = r.get(P["assigned_to_processing"])
-    return out
+    rows = hs.search_groups(groups, [P["assigned_to_processing"]])
+    ttfr = _authoritative(hs, [r["id"] for r in rows], P["ttfr"])
+    return _classify(rows, ttfr, TTFR_MS, within,
+                     lambda r: r.get(P["assigned_to_processing"]), tag="completed PA")
 
 
 def _completed_in_process(hs, within: bool):
@@ -136,17 +144,10 @@ def _completed_in_process(hs, within: bool):
     ]
     if not within:  # 2(g) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_support_ticket"]])
-    out = {}
-    for r in rows:
-        ttp = to_num(r.get(P["total_time_in_process"]))
-        if ttp is None:
-            continue
-        within_sla = ttp <= 240
-        if within != within_sla:
-            continue
-        out[r["id"]] = r.get(P["assigned_to_support_ticket"])
-    return out
+    rows = hs.search(filters, [P["assigned_to_support_ticket"]])
+    ttp = _authoritative(hs, [r["id"] for r in rows], P["total_time_in_process"])
+    return _classify(rows, ttp, 240, within,
+                     lambda r: r.get(P["assigned_to_support_ticket"]), tag="completed IP")
 
 
 def _completed_pending_conf(hs, within: bool):
@@ -162,18 +163,12 @@ def _completed_pending_conf(hs, within: bool):
     ]
     if within:  # 2(j) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
-    out = {}
-    for r in rows:
-        ttc = to_num(r.get(P["total_time_pending_conf"]))
-        if ttc is None:
-            continue
-        within_sla = ttc <= 15
-        if within != within_sla:
-            continue
-        out[r["id"]] = (r.get(P["assigned_to_final_review"])
-                        or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"]))
-    return out
+    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
+    ttc = _authoritative(hs, [r["id"] for r in rows], P["total_time_pending_conf"])
+    return _classify(rows, ttc, 15, within,
+                     lambda r: (r.get(P["assigned_to_final_review"])
+                                or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
+                     tag="completed PC")
 
 
 def _sum_per_person(hs, subresults):
@@ -217,15 +212,10 @@ def _today_pending_action(hs, within: bool):
         {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
         {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
     ]
-    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_processing"]])
-    out = {}
-    for r in rows:
-        ttfr = to_num(r.get(P["ttfr"]))
-        within_sla = ttfr is not None and ttfr <= TTFR_MS
-        if within != within_sla:
-            continue
-        out[r["id"]] = r.get(P["assigned_to_processing"])
-    return out
+    rows = hs.search(filters, [P["assigned_to_processing"]])
+    ttfr = _authoritative(hs, [r["id"] for r in rows], P["ttfr"])
+    return _classify(rows, ttfr, TTFR_MS, within,
+                     lambda r: r.get(P["assigned_to_processing"]), tag="today PA")
 
 
 def _today_in_process(hs, within: bool):
@@ -244,21 +234,20 @@ def _today_in_process(hs, within: bool):
     ]
     if not within:  # 2(k) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_support_ticket"], P["owner"],
-                                              P["in_process_reason"]])
-    out = {}
-    for r in rows:
-        ttp = to_num(r.get(P["total_time_in_process"]))
-        if ttp is None or (ttp <= 15) != within:
-            continue
-        if daniel and str(r.get(P["owner"])) == daniel:          # owner ≠ Daniel Willett
-            continue
+    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"]])
+    ttp = _authoritative(hs, [r["id"] for r in rows], P["total_time_in_process"])
+
+    def keep(r):
+        if daniel and str(r.get(P["owner"])) == daniel:           # owner ≠ Daniel Willett
+            return False
         if not within:                                            # 2(k): reason ∌ nbin/custodian
             rz = (r.get(P["in_process_reason"]) or "").lower()
             if "nbin" in rz or "custodian" in rz:
-                continue
-        out[r["id"]] = r.get(P["assigned_to_support_ticket"])
-    return out
+                return False
+        return True
+
+    return _classify(rows, ttp, 15, within,
+                     lambda r: r.get(P["assigned_to_support_ticket"]), keep=keep, tag="today IP")
 
 
 def _today_pending_conf(hs, within: bool):
@@ -274,15 +263,12 @@ def _today_pending_conf(hs, within: bool):
     ]
     if within:  # 2(n) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, RETURN_PROPS + [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
-    out = {}
-    for r in rows:
-        ttc = to_num(r.get(P["total_time_pending_conf"]))
-        if ttc is None or (ttc <= 15) != within:
-            continue
-        out[r["id"]] = (r.get(P["assigned_to_final_review"])
-                        or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"]))
-    return out
+    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
+    ttc = _authoritative(hs, [r["id"] for r in rows], P["total_time_pending_conf"])
+    return _classify(rows, ttc, 15, within,
+                     lambda r: (r.get(P["assigned_to_final_review"])
+                                or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
+                     tag="today PC")
 
 
 def build_today(hs: HubSpot, within: bool):
