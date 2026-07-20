@@ -15,20 +15,26 @@ import sys
 from hubspot_client import HubSpot, P, days_ago_ms, today_bounds_ms, to_num
 
 
-def _authoritative(hs, ids, prop):
-    """Authoritative value of a (calculated / lazily-computed) property via
-    batch/read: {id: float|None}.
+def _resolve(hs, rows, prop):
+    """Value of a classification metric per ticket: {id: float|None}.
 
     The SLA split relies on calculated properties (time_to_first_agent_reply,
     total_time_in_process_*, total_time_in_pending_confirmation_*). Read inline from
-    the Search response these are computed lazily and can come back null or stale,
-    which silently dropped or mis-bucketed tickets — the cause of the intermittent
-    miscounts. batch/read forces HubSpot to return the computed value, so the
-    classification is deterministic regardless of index/search timing."""
-    if not ids:
-        return {}
-    got = hs.batch_read(list(ids), [prop])
-    return {tid: to_num(p.get(prop)) for tid, p in got.items()}
+    the Search response these are computed lazily and occasionally come back null,
+    which silently dropped or mis-bucketed tickets — the source of the intermittent
+    miscounts. We take the Search value when present (fast, and what the boards were
+    calibrated on) and fall back to a batch/read ONLY for the tickets Search left
+    null — batch/read forces HubSpot to compute the value. This is never worse than
+    reading from Search alone and recovers the ones Search dropped, so the
+    classification no longer flickers with index/calc timing."""
+    metric, missing = {}, []
+    for r in rows:
+        v = to_num(r.get(prop))
+        (missing.append(r["id"]) if v is None else metric.__setitem__(r["id"], v))
+    if missing:
+        for tid, p in hs.batch_read(missing, [prop]).items():
+            metric[tid] = to_num(p.get(prop))
+    return metric
 
 
 def _classify(rows, metric, threshold, within, owner_of, *, keep=None, tag=""):
@@ -124,8 +130,8 @@ def _completed_pending_action(hs, within: bool):
         {"filters": common + [{"propertyName": P["create_date"], "operator": "GT", "value": cutoff}]},
         {"filters": common + [{"propertyName": P["first_agent_response"], "operator": "GT", "value": cutoff}]},
     ]
-    rows = hs.search_groups(groups, [P["assigned_to_processing"]])
-    ttfr = _authoritative(hs, [r["id"] for r in rows], P["ttfr"])
+    rows = hs.search_groups(groups, [P["assigned_to_processing"], P["ttfr"]])
+    ttfr = _resolve(hs, rows, P["ttfr"])
     return _classify(rows, ttfr, TTFR_MS, within,
                      lambda r: r.get(P["assigned_to_processing"]), tag="completed PA")
 
@@ -144,8 +150,8 @@ def _completed_in_process(hs, within: bool):
     ]
     if not within:  # 2(g) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_support_ticket"]])
-    ttp = _authoritative(hs, [r["id"] for r in rows], P["total_time_in_process"])
+    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["total_time_in_process"]])
+    ttp = _resolve(hs, rows, P["total_time_in_process"])
     return _classify(rows, ttp, 240, within,
                      lambda r: r.get(P["assigned_to_support_ticket"]), tag="completed IP")
 
@@ -163,8 +169,9 @@ def _completed_pending_conf(hs, within: bool):
     ]
     if within:  # 2(j) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
-    ttc = _authoritative(hs, [r["id"] for r in rows], P["total_time_pending_conf"])
+    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"],
+                               P["total_time_pending_conf"]])
+    ttc = _resolve(hs, rows, P["total_time_pending_conf"])
     return _classify(rows, ttc, 15, within,
                      lambda r: (r.get(P["assigned_to_final_review"])
                                 or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
@@ -212,8 +219,8 @@ def _today_pending_action(hs, within: bool):
         {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
         {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
     ]
-    rows = hs.search(filters, [P["assigned_to_processing"]])
-    ttfr = _authoritative(hs, [r["id"] for r in rows], P["ttfr"])
+    rows = hs.search(filters, [P["assigned_to_processing"], P["ttfr"]])
+    ttfr = _resolve(hs, rows, P["ttfr"])
     return _classify(rows, ttfr, TTFR_MS, within,
                      lambda r: r.get(P["assigned_to_processing"]), tag="today PA")
 
@@ -234,8 +241,9 @@ def _today_in_process(hs, within: bool):
     ]
     if not within:  # 2(k) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"]])
-    ttp = _authoritative(hs, [r["id"] for r in rows], P["total_time_in_process"])
+    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"],
+                               P["total_time_in_process"]])
+    ttp = _resolve(hs, rows, P["total_time_in_process"])
 
     def keep(r):
         if daniel and str(r.get(P["owner"])) == daniel:           # owner ≠ Daniel Willett
@@ -263,8 +271,9 @@ def _today_pending_conf(hs, within: bool):
     ]
     if within:  # 2(n) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"]])
-    ttc = _authoritative(hs, [r["id"] for r in rows], P["total_time_pending_conf"])
+    rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"],
+                               P["total_time_pending_conf"]])
+    ttc = _resolve(hs, rows, P["total_time_pending_conf"])
     return _classify(rows, ttc, 15, within,
                      lambda r: (r.get(P["assigned_to_final_review"])
                                 or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
