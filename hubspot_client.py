@@ -35,6 +35,7 @@ P = {
     "assigned_to_final_review": "assigned_to_final_review",
     "in_process_reason": "support_ticket__in_process_reason",
     "date_entered_in_process": "date_entered_in_process_support_ticket",           # calc=False
+    "date_entered_in_review": "date_entered_in_review_pending_action",             # calc=False; label "Date entered In Review (Support Ticket)"
     "date_exited_in_process": "date_exited_in_process_support_ticket",             # calc=False
     "date_exited_pending_conf": "date_exited_pending_confirmation_support_ticket",  # calc=False
     "date_entered_pending_action": "date_entered_in_process_pending_action",       # calc=False

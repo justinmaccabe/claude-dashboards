@@ -12,7 +12,22 @@ from __future__ import annotations
 
 import sys
 
-from hubspot_client import HubSpot, P, days_ago_ms, today_bounds_ms, to_num
+from hubspot_client import HubSpot, P, days_ago_ms, today_bounds_ms, to_ms, to_num
+
+
+def _pa_minutes(rows):
+    """Report 2(e)/2(f)'s 'Total Time in Pending action' formula, reproduced exactly:
+      DATEDIFF('MINUTE', date_entered_in_review_pending_action, date_entered_in_process_support_ticket)
+    i.e. whole minutes between entering In Review and entering In Process. Both are
+    stored date properties (returned by Search). {id: minutes|None}; None (either
+    timestamp missing) -> unclassifiable, matching the report (the >15 / <=15 filter
+    excludes null-formula rows)."""
+    out = {}
+    for r in rows:
+        a = to_ms(r.get(P["date_entered_in_review"]))
+        b = to_ms(r.get(P["date_entered_in_process"]))
+        out[r["id"]] = None if (a is None or b is None) else (b - a) // 60000  # floor, like DATEDIFF
+    return out
 
 
 def _resolve(hs, rows, prop):
@@ -112,27 +127,24 @@ def build_open_outside(hs: HubSpot):
 # ---------------------------------------------------------------------------
 # Board B / C — Completed Last 7 Days (Outside / Within SLA)
 # ---------------------------------------------------------------------------
-TTFR_MS = 15 * 60 * 1000   # "15 minutes"; time_to_first_agent_reply is stored in ms
+_PA_PROPS = [P["assigned_to_processing"], P["date_entered_in_review"], P["date_entered_in_process"]]
 
 
 def _completed_pending_action(hs, within: bool):
-    """2(f) within / 2(e) outside — Pending Action. SLA = time-to-first-reply vs 15m.
-    Attributed to assigned_to_processing (the rep who did the processing)."""
+    """2(f) within / 2(e) outside — Pending Action Completed Last 7 Days. Matches the
+    report exactly: pipeline=Support, action_item != Pending Action, create date < 8
+    days ago, Assigned to Processing known; SLA on the 'Total Time in Pending action'
+    formula (<=15 within / >15 outside). Attributed to assigned_to_processing."""
     pid, _ = hs.support_ids()
     cutoff = days_ago_ms(8)
-    common = [
+    filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Action"]},
         {"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"},
+        {"propertyName": P["create_date"], "operator": "GT", "value": cutoff},   # "Create date < 8 days ago"
     ]
-    # Window server-side as two OR'd groups to stay under the 10k cap.
-    groups = [
-        {"filters": common + [{"propertyName": P["create_date"], "operator": "GT", "value": cutoff}]},
-        {"filters": common + [{"propertyName": P["first_agent_response"], "operator": "GT", "value": cutoff}]},
-    ]
-    rows = hs.search_groups(groups, [P["assigned_to_processing"], P["ttfr"]])
-    ttfr = _resolve(hs, rows, P["ttfr"])
-    return _classify(rows, ttfr, TTFR_MS, within,
+    rows = hs.search(filters, _PA_PROPS)
+    return _classify(rows, _pa_minutes(rows), 15, within,
                      lambda r: r.get(P["assigned_to_processing"]), tag="completed PA")
 
 
@@ -207,21 +219,23 @@ def build_completed(hs: HubSpot, within: bool):
 # "Date <Entered/Exited> <stage> is Today"; In-Process SLA splits at 15 (not 240).
 # ---------------------------------------------------------------------------
 def _today_pending_action(hs, within: bool):
-    """2(e)/2(f) 'today' row — Pending Action entered today. Attributed to
-    assigned_to_processing; SLA on time-to-first-reply vs 15m."""
+    """2(e)/2(f) 'today row' — the report groups by 'Date entered In Review (Support
+    Ticket)'; today's row = tickets that entered In Review today. Same filters/metric
+    as the 7-day report, plus the today window on date_entered_in_review. Attributed
+    to assigned_to_processing."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
+    cutoff = days_ago_ms(8)
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Action"]},
         {"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"},
-        # "completed pending action today" == entered the next stage (In Process) today
-        {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
+        {"propertyName": P["create_date"], "operator": "GT", "value": cutoff},
+        {"propertyName": P["date_entered_in_review"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_entered_in_review"], "operator": "LT", "value": t1},
     ]
-    rows = hs.search(filters, [P["assigned_to_processing"], P["ttfr"]])
-    ttfr = _resolve(hs, rows, P["ttfr"])
-    return _classify(rows, ttfr, TTFR_MS, within,
+    rows = hs.search(filters, _PA_PROPS)
+    return _classify(rows, _pa_minutes(rows), 15, within,
                      lambda r: r.get(P["assigned_to_processing"]), tag="today PA")
 
 
