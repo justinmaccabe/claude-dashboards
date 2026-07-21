@@ -29,6 +29,9 @@ TEAL = "#5E8A7E"
 INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
+# Bump on each deploy so the live build is verifiable on-screen (footer/clock).
+BUILD = "21Jul-v2-mirror"
+
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
     "completed-both": {
@@ -310,7 +313,7 @@ html.append(f"""
 {logo_markup()}
 <div class="headline"><div class="pip"></div><h1>{CFG['title']}</h1><div class="lbl">{CFG['label']}</div></div>
 <div class="clock"><div class="t">{now:%-I:%M %p}</div><div class="d">{now:%A, %B %-d, %Y}</div>
-<div class="upd">Synced {updated_txt} · every 15 min</div></div>
+<div class="upd">Synced {updated_txt} · every 15 min · {BUILD}</div></div>
 </div></div>
 """)
 
