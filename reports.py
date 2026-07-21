@@ -190,37 +190,26 @@ def _completed_pending_conf(hs, within: bool):
                      tag="completed PC")
 
 
-def _distinct_per_person(hs, subresults):
-    """Per person, the number of DISTINCT tickets they are a stage-assignee on
-    across the sub-reports.
-
-    This is the middle ground between the two earlier approaches, and it is the
-    only one that is correct in every case:
-
-      * The old ``_union`` merged the legs into one {ticket: owner} dict, so a
-        later leg OVERWROTE an earlier leg's owner for the same ticket — dropping
-        a person's credit when two different people handled different stages of one
-        ticket (Rashi's In-Process count fell to 1).
-      * ``_sum_per_person`` then counted a ticket once *per leg*, which credits the
-        SAME person once per stage — inflating anyone who handled multiple stages
-        of one ticket (Adam showed 6 for 2 tickets; Batuhan 12 for 6).
-
-    Bucketing distinct ticket ids per owner fixes both: different people on
-    different stages each keep the ticket (no drop), and one person on several
-    stages of a ticket counts it once (no inflation)."""
+def _sum_per_person(hs, subresults):
+    """Per person, the SUM of their counts across the sub-reports — i.e. exactly
+    what you get by adding the three CRM reports together (2f+2l+2n for Within,
+    2e+2k+2m for Outside). A ticket that appears in more than one leg for the same
+    person is counted once PER leg, matching the source reports (each report counts
+    it independently). This mirrors the reports rather than de-duping tickets:
+    the board is 'sum the three reports', per the report owners' definition."""
     id_to_name, _ = hs.owner_maps()
-    tickets_by_owner = {}                       # owner_id -> {ticket_id, ...}
-    for sr in subresults:
-        for tid, oid in sr.items():             # sr is {ticket_id: owner_id}
+    counts = {}
+    for sr in subresults:                        # sr is {ticket_id: owner_id}
+        for oid in sr.values():
             if not oid:
                 continue
-            tickets_by_owner.setdefault(str(oid), set()).add(tid)
-    return {id_to_name.get(oid, oid): len(tids)
-            for oid, tids in tickets_by_owner.items()}
+            name = id_to_name.get(str(oid), str(oid))
+            counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def build_completed(hs: HubSpot, within: bool):
-    return _distinct_per_person(hs, [
+    return _sum_per_person(hs, [
         _completed_pending_action(hs, within),
         _completed_in_process(hs, within),
         _completed_pending_conf(hs, within),
@@ -309,7 +298,7 @@ def _today_pending_conf(hs, within: bool):
 
 
 def build_today(hs: HubSpot, within: bool):
-    return _distinct_per_person(hs, [
+    return _sum_per_person(hs, [
         _today_pending_action(hs, within),
         _today_in_process(hs, within),
         _today_pending_conf(hs, within),
