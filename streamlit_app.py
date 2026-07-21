@@ -98,6 +98,66 @@ def _fetch(report_key: str, _tok_tail: str):
     return counts, dt.datetime.now(dt.timezone.utc)
 
 
+def _debug_requested():
+    try:
+        return str(st.query_params.get("debug") or "") in ("1", "true", "yes")
+    except Exception:
+        return False
+
+
+def _render_reconciliation():
+    """?debug=1 — per-person, per-leg composition of the today boards so numbers
+    can be reconciled against the source reports. Never part of the TV render."""
+    import html as _html
+
+    from hubspot_client import HubSpot
+
+    sides = []
+    if KEY in ("today-both", "today-within"):
+        sides.append(("Within SLA (2f today-row + 2l + 2n)", True))
+    if KEY in ("today-both", "today-outside"):
+        sides.append(("Outside SLA (2e today-row + 2k + 2m)", False))
+    if not sides:
+        sides = [("Within SLA", True), ("Outside SLA", False)]
+
+    st.title("Reconciliation — today boards")
+    st.caption("summed = what the TV shows (a ticket counts once per leg). "
+               "distinct = unique tickets credited to that person. "
+               "summed > distinct ⇒ that person handled multiple stages of the "
+               "same ticket today and is being multi-counted.")
+    hs = HubSpot(token=_token())
+    for label, within in sides:
+        st.header(label)
+        bd = reports.today_breakdown(hs, within)
+        if not bd:
+            st.write("_No rows in this view right now._")
+            continue
+        leg_names = [n for n, _ in reports._TODAY_LEGS["within" if within else "outside"]]
+        rows = []
+        for person in sorted(bd, key=lambda p: (-bd[p]["summed"], p)):
+            rec = bd[person]
+            cells = {"person": person}
+            for ln in leg_names:
+                ids = rec["legs"].get(ln, [])
+                cells[ln] = f"{len(ids)}  " + (", ".join(ids) if ids else "")
+            cells["SUMMED (TV)"] = rec["summed"]
+            cells["DISTINCT"] = rec["distinct"]
+            cells["flag"] = "⚠︎ multi-counted" if rec["summed"] != rec["distinct"] else ""
+            rows.append(cells)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.write(f"**Board total (summed):** {sum(r['SUMMED (TV)'] for r in rows)}  ·  "
+                 f"**distinct-ticket total:** {sum(r['DISTINCT'] for r in rows)}")
+        _ = _html  # keep import referenced
+
+
+if _debug_requested():
+    try:
+        _render_reconciliation()
+    except Exception as e:
+        st.error(f"debug view error: {e}")
+    st.stop()
+
+
 def logo_markup() -> str:
     mimes = {"svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg",
              "jpeg": "image/jpeg", "webp": "image/webp"}

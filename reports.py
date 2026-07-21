@@ -190,23 +190,37 @@ def _completed_pending_conf(hs, within: bool):
                      tag="completed PC")
 
 
-def _sum_per_person(hs, subresults):
-    """SUM per-person counts across sub-reports (a ticket that completes several
-    stages counts once per report, crediting each stage's assignee) — matches
-    summing the CRM reports, not de-duping tickets."""
+def _distinct_per_person(hs, subresults):
+    """Per person, the number of DISTINCT tickets they are a stage-assignee on
+    across the sub-reports.
+
+    This is the middle ground between the two earlier approaches, and it is the
+    only one that is correct in every case:
+
+      * The old ``_union`` merged the legs into one {ticket: owner} dict, so a
+        later leg OVERWROTE an earlier leg's owner for the same ticket — dropping
+        a person's credit when two different people handled different stages of one
+        ticket (Rashi's In-Process count fell to 1).
+      * ``_sum_per_person`` then counted a ticket once *per leg*, which credits the
+        SAME person once per stage — inflating anyone who handled multiple stages
+        of one ticket (Adam showed 6 for 2 tickets; Batuhan 12 for 6).
+
+    Bucketing distinct ticket ids per owner fixes both: different people on
+    different stages each keep the ticket (no drop), and one person on several
+    stages of a ticket counts it once (no inflation)."""
     id_to_name, _ = hs.owner_maps()
-    counts = {}
+    tickets_by_owner = {}                       # owner_id -> {ticket_id, ...}
     for sr in subresults:
-        for oid in sr.values():
+        for tid, oid in sr.items():             # sr is {ticket_id: owner_id}
             if not oid:
                 continue
-            name = id_to_name.get(str(oid), str(oid))
-            counts[name] = counts.get(name, 0) + 1
-    return counts
+            tickets_by_owner.setdefault(str(oid), set()).add(tid)
+    return {id_to_name.get(oid, oid): len(tids)
+            for oid, tids in tickets_by_owner.items()}
 
 
 def build_completed(hs: HubSpot, within: bool):
-    return _sum_per_person(hs, [
+    return _distinct_per_person(hs, [
         _completed_pending_action(hs, within),
         _completed_in_process(hs, within),
         _completed_pending_conf(hs, within),
@@ -295,11 +309,52 @@ def _today_pending_conf(hs, within: bool):
 
 
 def build_today(hs: HubSpot, within: bool):
-    return _sum_per_person(hs, [
+    return _distinct_per_person(hs, [
         _today_pending_action(hs, within),
         _today_in_process(hs, within),
         _today_pending_conf(hs, within),
     ])
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation diagnostic (never shown on the TV; ?debug=1 only).
+# Exposes each person's per-leg composition so board numbers can be checked
+# against the source reports leg-by-leg, and so the summed total vs the
+# distinct-ticket count are visible side by side.
+# ---------------------------------------------------------------------------
+_TODAY_LEGS = {
+    "within": [("PA · 2(f) today-row", _today_pending_action),
+               ("IP · 2(l)", _today_in_process),
+               ("PC · 2(n)", _today_pending_conf)],
+    "outside": [("PA · 2(e) today-row", _today_pending_action),
+                ("IP · 2(k)", _today_in_process),
+                ("PC · 2(m)", _today_pending_conf)],
+}
+
+
+def today_breakdown(hs: HubSpot, within: bool):
+    """{person: {"legs": {leg_name: [ticket_ids]}, "summed": int, "distinct": int}}.
+
+    `summed` = what the board currently shows (a ticket counts once per leg it
+    lands in). `distinct` = unique ticket ids credited to that person across all
+    legs. When summed > distinct for a person, that person handled >1 stage of the
+    same ticket today and is being multi-counted."""
+    id_to_name, _ = hs.owner_maps()
+    legs = _TODAY_LEGS["within" if within else "outside"]
+    people = {}
+    for leg_name, fn in legs:
+        for tid, oid in fn(hs, within).items():
+            if not oid:
+                continue
+            name = id_to_name.get(str(oid), str(oid))
+            rec = people.setdefault(name, {})
+            rec.setdefault(leg_name, []).append(tid)
+    out = {}
+    for name, rec in people.items():
+        all_ids = [t for ids in rec.values() for t in ids]
+        out[name] = {"legs": rec, "summed": len(all_ids),
+                     "distinct": len(set(all_ids))}
+    return out
 
 
 # ---------------------------------------------------------------------------
