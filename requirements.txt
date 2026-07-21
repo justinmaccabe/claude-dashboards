@@ -3,3 +3,4 @@ streamlit-autorefresh>=1.0.1
 pandas>=2.0
 requests>=2.31
 tzdata>=2024.1
+# redeploy nudge 21Jul-v2
