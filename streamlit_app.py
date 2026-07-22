@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-stages4"
+BUILD = "22Jul-stages5"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -273,15 +273,15 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
    name shown (no cap), and Pending Confirmation shifts down to start at the same
    level on both Outside and Within. */
 .stagegrid {{ flex:1 1 auto; min-height:0; display:grid;
-              grid-template-columns:1fr 1fr; column-gap:2rem; row-gap:.7rem;
-              align-content:start; margin-top:1.1rem; }}
+              grid-template-columns:1fr 1fr; column-gap:2rem; row-gap:.5rem;
+              align-content:start; margin-top:.7rem; padding-bottom:1rem; }}
 .stage {{ min-width:0; }}
 .stage .sh {{ display:flex; justify-content:space-between; align-items:baseline;
-              border-bottom:1px solid rgba(255,255,255,.15); padding-bottom:.25rem; margin-bottom:.45rem; }}
+              border-bottom:1px solid rgba(255,255,255,.15); padding-bottom:.2rem; margin-bottom:.35rem; }}
 .stage .sh .sl {{ font-family:'Lora',serif; font-size:1.15rem; font-weight:600; color:{INK}; letter-spacing:.02em; }}
 .stage .sh .sc {{ font-family:'Lora',serif; font-size:1.35rem; font-weight:700; }}
 .stage.warn .sh .sc {{ color:{ORANGE}; }} .stage.good .sh .sc {{ color:{TEAL}; }}
-.srow {{ display:flex; align-items:center; gap:.6rem; padding:.28rem .55rem; margin-bottom:.28rem;
+.srow {{ display:flex; align-items:center; gap:.6rem; padding:.16rem .55rem; margin-bottom:.16rem;
          border-radius:10px; }}
 .srow.top {{ background:rgba(201,123,48,.11); }} .stage.good .srow.top {{ background:rgba(94,138,126,.13); }}
 .srow .sr {{ flex:0 0 1.7rem; text-align:right; font-family:'Lora',serif; color:{MUTED}; font-size:1.05rem; }}
