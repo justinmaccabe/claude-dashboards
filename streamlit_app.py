@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-stages6"
+BUILD = "22Jul-stages7"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -279,9 +279,10 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 .board.stages .headline .lbl {{ margin-top:.2rem; }}
 .board.stages .brand .logo-badge {{ width:42px; height:42px; }}
 .board.stages .clock .t {{ font-size:1.25rem; }}
-.stagegrid {{ flex:1 1 auto; min-height:0; display:grid;
-              grid-template-columns:1fr 1fr; column-gap:2rem; row-gap:.5rem;
-              align-content:start; margin-top:.5rem; padding-bottom:1.2rem; }}
+.stagewrap {{ flex:1 1 auto; min-height:0; display:flex; gap:2rem;
+              align-items:flex-start; margin-top:.5rem; padding-bottom:1.2rem; }}
+.stagecol {{ flex:1 1 0; min-width:0; }}
+.stagecol .stage {{ margin-bottom:.55rem; }}
 .stage {{ min-width:0; }}
 .stage .sh {{ display:flex; justify-content:space-between; align-items:baseline;
               border-bottom:1px solid rgba(255,255,255,.15); padding-bottom:.2rem; margin-bottom:.35rem; }}
@@ -393,23 +394,22 @@ html.append(f"""
 if err:
     html.append(f'<div class="empty">Waiting on data — {err}</div>')
 elif IS_STAGES:
-    html.append('<div class="stagegrid">')
-    # grid row 1: the two column headers (Outside | Within)
+    # Two independent columns (Outside | Within). Each column stacks its own 3
+    # stages one under another, so Pending Confirmation sits directly beneath that
+    # column's In Process with no cross-column padding/blank space. Every name is
+    # shown (no cap). No footer on this view.
+    html.append('<div class="stagewrap">')
     for side_label, tone, data in stage_sides:
         side_total = sum(int(c) for _, rws in data for _, c in rws)
-        html.append(f'<div class="ptitle {tone}">{side_label}<span class="pc">{side_total}</span></div>')
-    # grid rows 2..4: each stage as one row (outside cell, then within cell). The grid
-    # keeps the two columns' stages aligned regardless of row counts — so the shorter
-    # column's stage simply gets padded and Pending Confirmation lines up on both sides.
-    # Every name is shown (no cap). No footer on this view.
-    n_stages = len(stage_sides[0][2]) if stage_sides else 0
-    for si in range(n_stages):
-        for side_label, tone, data in stage_sides:
-            stage_label, rws = data[si]
+        col = [f'<div class="stagecol {tone}">',
+               f'<div class="ptitle {tone}">{side_label}<span class="pc">{side_total}</span></div>']
+        for stage_label, rws in data:
             stage_total = sum(int(c) for _, c in rws)
-            html.append(f'<div class="stage {tone}"><div class="sh">'
-                        f'<span class="sl">{stage_label}</span><span class="sc">{stage_total}</span></div>'
-                        f'{stage_rows_html(rws)}</div>')
+            col.append(f'<div class="stage {tone}"><div class="sh">'
+                       f'<span class="sl">{stage_label}</span><span class="sc">{stage_total}</span></div>'
+                       f'{stage_rows_html(rws)}</div>')
+        col.append('</div>')
+        html.append("".join(col))
     html.append('</div>')
 elif IS_COMBINED:
     html.append('<div class="split">')
