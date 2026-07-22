@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-stages5"
+BUILD = "22Jul-stages6"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -272,9 +272,16 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 /* stacked per-stage view: 2-col grid so each stage lines up across columns — every
    name shown (no cap), and Pending Confirmation shifts down to start at the same
    level on both Outside and Within. */
+/* this view is data-dense, so shrink the hero to give the tables more vertical room */
+.board.stages {{ padding-top:.8rem; }}
+.board.stages .hero {{ padding-bottom:.35rem; }}
+.board.stages .headline h1 {{ font-size:1.5rem; }}
+.board.stages .headline .lbl {{ margin-top:.2rem; }}
+.board.stages .brand .logo-badge {{ width:42px; height:42px; }}
+.board.stages .clock .t {{ font-size:1.25rem; }}
 .stagegrid {{ flex:1 1 auto; min-height:0; display:grid;
               grid-template-columns:1fr 1fr; column-gap:2rem; row-gap:.5rem;
-              align-content:start; margin-top:.7rem; padding-bottom:1rem; }}
+              align-content:start; margin-top:.5rem; padding-bottom:1.2rem; }}
 .stage {{ min-width:0; }}
 .stage .sh {{ display:flex; justify-content:space-between; align-items:baseline;
               border-bottom:1px solid rgba(255,255,255,.15); padding-bottom:.2rem; margin-bottom:.35rem; }}
@@ -371,7 +378,7 @@ if not err:
 updated_txt = captured.astimezone(TZ).strftime("%-I:%M %p") if captured is not None else "—"
 
 # --- header ----------------------------------------------------------------
-html = ['<div class="board">']
+html = [f'<div class="board{" stages" if IS_STAGES else ""}">']
 html.append(f"""
 <div class="hero">{CURVES}
 <div class="hero-row">
