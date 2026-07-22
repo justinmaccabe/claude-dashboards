@@ -81,21 +81,26 @@ class HubSpot:
         hubspot_owner_id both store owner ids."""
         if self._owner_cache:
             return self._owner_cache
-        id_to_name, name_to_id, after = {}, {}, None
-        while True:
-            params = {"limit": 100}
-            if after:
-                params["after"] = after
-            data = self._req("GET", "/crm/v3/owners", params=params)
-            for o in data.get("results", []):
-                oid = str(o.get("id"))
-                name = (f"{o.get('firstName') or ''} {o.get('lastName') or ''}".strip()
-                        or o.get("email") or oid)
-                id_to_name[oid] = name
-                name_to_id[name.casefold()] = oid
-            after = data.get("paging", {}).get("next", {}).get("after")
-            if not after:
-                break
+        id_to_name, name_to_id = {}, {}
+        # Fetch active owners AND archived (deactivated) owners, so someone who
+        # completed tickets in the window and was later deactivated (e.g. Ardinela
+        # Hoxha, Philip Swan) still resolves to a name instead of a raw owner id.
+        for archived in ("false", "true"):
+            after = None
+            while True:
+                params = {"limit": 100, "archived": archived}
+                if after:
+                    params["after"] = after
+                data = self._req("GET", "/crm/v3/owners", params=params)
+                for o in data.get("results", []):
+                    oid = str(o.get("id"))
+                    name = (f"{o.get('firstName') or ''} {o.get('lastName') or ''}".strip()
+                            or o.get("email") or oid)
+                    id_to_name.setdefault(oid, name)          # active name wins on any clash
+                    name_to_id.setdefault(name.casefold(), oid)
+                after = data.get("paging", {}).get("next", {}).get("after")
+                if not after:
+                    break
         self._owner_cache = (id_to_name, name_to_id)
         return self._owner_cache
 

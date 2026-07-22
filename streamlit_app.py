@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-reentry"
+BUILD = "22Jul-stages"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -48,20 +48,32 @@ COMBINED = {
     },
 }
 
+# Stacked per-stage view: two columns (Outside | Within), each with 3 stage tables
+# (Pending Action, In Process, Pending Confirmation) — NOT summed.
+STAGE_VIEW = {
+    "completed-stages": {
+        "title": "Tickets Completed This Week — by Stage",
+        "label": "Advisor Support · Service Delivery",
+    },
+}
+
 
 def _report_key():
     try:
         k = st.query_params.get("report")
     except Exception:
         k = None
-    if k in reports.REPORTS or k in COMBINED:
+    if k in reports.REPORTS or k in COMBINED or k in STAGE_VIEW:
         return k
     return reports.DEFAULT_REPORT
 
 
 KEY = _report_key()
 IS_COMBINED = KEY in COMBINED
-CFG = COMBINED[KEY] if IS_COMBINED else reports.REPORTS[KEY]
+IS_STAGES = KEY in STAGE_VIEW
+CFG = (STAGE_VIEW[KEY] if IS_STAGES
+       else COMBINED[KEY] if IS_COMBINED
+       else reports.REPORTS[KEY])
 
 st.set_page_config(page_title=f"{CFG['title']} — Optimize", page_icon="◆",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -99,6 +111,17 @@ def _fetch(report_key: str, _tok_tail: str):
     from hubspot_client import HubSpot
     counts = reports.REPORTS[report_key]["build"](HubSpot(token=_token()))
     return counts, dt.datetime.now(dt.timezone.utc)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_stages(within: bool, _tok_tail: str):
+    """Completed-Last-7-Days per stage for one SLA side. Returns
+    ([(stage_label, [(name, count), ...]), ...], fetched_at)."""
+    from hubspot_client import HubSpot
+    stages = reports.build_completed_stage(HubSpot(token=_token()), within)
+    out = [(label, sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+           for label, counts in stages]
+    return out, dt.datetime.now(dt.timezone.utc)
 
 
 def _debug_requested():
@@ -245,6 +268,23 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 .foot .gbig {{ font-family:'Lora',serif; color:{TEAL}; font-size:1.5rem; vertical-align:-2px; }}
 .empty {{ flex:1 1 auto; display:flex; align-items:center; justify-content:center; color:{MUTED}; font-size:1.1rem; }}
 .pempty {{ color:{MUTED}; padding:.6rem .2rem; }}
+
+/* stacked per-stage view: two columns, 3 stage tables each */
+.stagewrap {{ flex:1 1 auto; display:flex; gap:2rem; margin-top:1rem; align-items:flex-start; min-height:0; }}
+.stagecol {{ flex:1 1 0; min-width:0; }}
+.stage {{ margin-bottom:.85rem; }}
+.stage .sh {{ display:flex; justify-content:space-between; align-items:baseline;
+              border-bottom:1px solid rgba(255,255,255,.14); padding-bottom:.22rem; margin-bottom:.35rem; }}
+.stage .sh .sl {{ font-family:'Lora',serif; font-size:1.02rem; font-weight:600; color:{INK};
+                  letter-spacing:.02em; }}
+.stage .sh .sc {{ font-family:'Lora',serif; font-size:1.15rem; font-weight:700; }}
+.stagecol.warn .sh .sc {{ color:{ORANGE}; }} .stagecol.good .sh .sc {{ color:{TEAL}; }}
+.srow {{ display:flex; align-items:center; gap:.55rem; padding:.15rem .4rem; border-radius:7px; }}
+.srow.top {{ background:rgba(201,123,48,.10); }} .stagecol.good .srow.top {{ background:rgba(94,138,126,.12); }}
+.srow .sr {{ flex:0 0 1.4rem; text-align:right; font-family:'Lora',serif; color:{MUTED}; font-size:.92rem; }}
+.srow.top .sr {{ color:{ORANGE}; }} .stagecol.good .srow.top .sr {{ color:{TEAL}; }}
+.srow .sn {{ flex:1 1 auto; min-width:0; font-size:1rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.srow .sv {{ flex:0 0 2rem; text-align:right; font-family:'Lora',serif; font-weight:700; font-size:1.18rem; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -275,6 +315,21 @@ def rows_html(df, tone):
     return "".join(out)
 
 
+def stage_rows_html(rows):
+    """rows = [(name, count), ...] sorted desc — compact per-stage leaderboard."""
+    if not rows:
+        return '<div class="pempty">None in this stage ✓</div>'
+    out, rank, last = [], 0, None
+    for i, (name, c) in enumerate(rows):
+        if c != last:
+            rank = i + 1
+            last = c
+        cls = "srow top" if rank <= 3 else "srow"
+        out.append(f'<div class="{cls}"><span class="sr">{rank}</span>'
+                   f'<span class="sn">{name}</span><span class="sv">{int(c)}</span></div>')
+    return "".join(out)
+
+
 def fetch_df(key, tok):
     counts, captured = _fetch(key, tok[-8:])
     df = (pd.DataFrame(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
@@ -289,9 +344,16 @@ tok = _token()
 err = None if tok else "No HUBSPOT_TOKEN configured"
 captured = None
 panels = []   # list of (subtitle, tone, df) ; single board uses one entry with subtitle None
+stage_sides = []  # [(side_label, tone, [(stage_label, [(name, count), ...]), ...])]
 if not err:
     try:
-        if IS_COMBINED:
+        if IS_STAGES:
+            for within, side_label, tone in [(False, "Outside SLA", "warn"),
+                                             (True, "Within SLA", "good")]:
+                data, c = _fetch_stages(within, tok[-8:])
+                stage_sides.append((side_label, tone, data))
+                captured = captured or c
+        elif IS_COMBINED:
             for pkey, sub, tone in CFG["panels"]:
                 df, c = fetch_df(pkey, tok)
                 panels.append((sub, tone, df))
@@ -320,6 +382,26 @@ html.append(f"""
 # --- body ------------------------------------------------------------------
 if err:
     html.append(f'<div class="empty">Waiting on data — {err}</div>')
+elif IS_STAGES:
+    html.append('<div class="stagewrap">')
+    for side_label, tone, data in stage_sides:
+        side_total = sum(int(c) for _, rws in data for _, c in rws)
+        col = [f'<div class="stagecol {tone}">',
+               f'<div class="ptitle {tone}">{side_label}<span class="pc">{side_total}</span></div>']
+        for stage_label, rws in data:
+            stage_total = sum(int(c) for _, c in rws)
+            col.append(f'<div class="stage"><div class="sh">'
+                       f'<span class="sl">{stage_label}</span><span class="sc">{stage_total}</span></div>')
+            col.append(stage_rows_html(rws))
+            col.append('</div>')
+        col.append('</div>')
+        html.append("".join(col))
+    html.append('</div>')
+    foot_right = " &nbsp;·&nbsp; ".join(
+        f'<span class="{"gbig" if tone == "good" else "big"}">'
+        f'{sum(int(c) for _, rws in data for _, c in rws)}</span> {side_label.lower()}'
+        for side_label, tone, data in stage_sides)
+    html.append(f'<div class="foot"><div>If broken, contact Justin Maccabe</div><div>{foot_right}</div></div>')
 elif IS_COMBINED:
     html.append('<div class="split">')
     for sub, tone, df in panels:

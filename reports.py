@@ -235,6 +235,22 @@ def build_completed(hs: HubSpot, within: bool):
     ])
 
 
+# Per-stage breakdown of the Completed-Last-7-Days board — each stage kept SEPARATE
+# (not summed), for the stacked ?report=completed-stages view.
+_COMPLETED_STAGE_LEGS = [
+    ("Pending Action", _completed_pending_action),
+    ("In Process", _completed_in_process),
+    ("Pending Confirmation", _completed_pending_conf),
+]
+
+
+def build_completed_stage(hs: HubSpot, within: bool):
+    """[(stage_label, {name: count}), ...] in stage order — the three Completed Last
+    7 Days legs tallied per person individually (2e/2g/2i outside, 2f/2h/2j within)."""
+    return [(label, _sum_per_person(hs, [fn(hs, within)]))
+            for label, fn in _COMPLETED_STAGE_LEGS]
+
+
 # ---------------------------------------------------------------------------
 # Completed TODAY (2k/2l In Process, 2m/2n Pending Confirmation, 2e/2f Pending
 # Action's today row). Same shape as the 7-day boards but keyed off
