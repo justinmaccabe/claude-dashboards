@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-stages3"
+BUILD = "22Jul-stages4"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -269,29 +269,25 @@ html, body, .stApp {{ background: {NAVY}; overflow: hidden; }}
 .empty {{ flex:1 1 auto; display:flex; align-items:center; justify-content:center; color:{MUTED}; font-size:1.1rem; }}
 .pempty {{ color:{MUTED}; padding:.6rem .2rem; }}
 
-/* stacked per-stage view: 2-col grid so each stage row lines up across columns
-   (Pending Action beside Pending Action, Pending Confirmation starts at the same level) */
-.board.stages {{ padding-top:1rem; }}
-.board.stages .hero {{ padding-bottom:.5rem; }}
-.board.stages .headline h1 {{ font-size:1.6rem; }}
-.board.stages .brand .logo-badge {{ width:44px; height:44px; }}
-.stagegrid {{ flex:1 1 auto; min-height:0; overflow:hidden; display:grid;
-              grid-template-columns:1fr 1fr; column-gap:2.2rem; row-gap:.35rem;
-              align-content:start; margin-top:.55rem; }}
-.stagegrid > .ptitle {{ margin-bottom:.15rem; padding-bottom:.25rem; font-size:1.05rem; }}
+/* stacked per-stage view: 2-col grid so each stage lines up across columns — every
+   name shown (no cap), and Pending Confirmation shifts down to start at the same
+   level on both Outside and Within. */
+.stagegrid {{ flex:1 1 auto; min-height:0; display:grid;
+              grid-template-columns:1fr 1fr; column-gap:2rem; row-gap:.7rem;
+              align-content:start; margin-top:1.1rem; }}
 .stage {{ min-width:0; }}
 .stage .sh {{ display:flex; justify-content:space-between; align-items:baseline;
-              border-bottom:1px solid rgba(255,255,255,.14); padding-bottom:.1rem; margin-bottom:.15rem; }}
-.stage .sh .sl {{ font-family:'Lora',serif; font-size:.92rem; font-weight:600; color:{INK}; letter-spacing:.02em; }}
-.stage .sh .sc {{ font-family:'Lora',serif; font-size:1rem; font-weight:700; }}
+              border-bottom:1px solid rgba(255,255,255,.15); padding-bottom:.25rem; margin-bottom:.45rem; }}
+.stage .sh .sl {{ font-family:'Lora',serif; font-size:1.15rem; font-weight:600; color:{INK}; letter-spacing:.02em; }}
+.stage .sh .sc {{ font-family:'Lora',serif; font-size:1.35rem; font-weight:700; }}
 .stage.warn .sh .sc {{ color:{ORANGE}; }} .stage.good .sh .sc {{ color:{TEAL}; }}
-.srow {{ display:flex; align-items:center; gap:.5rem; padding:.03rem .35rem; border-radius:6px; }}
-.srow.top {{ background:rgba(201,123,48,.10); }} .stage.good .srow.top {{ background:rgba(94,138,126,.12); }}
-.srow .sr {{ flex:0 0 1.2rem; text-align:right; font-family:'Lora',serif; color:{MUTED}; font-size:.78rem; }}
+.srow {{ display:flex; align-items:center; gap:.6rem; padding:.28rem .55rem; margin-bottom:.28rem;
+         border-radius:10px; }}
+.srow.top {{ background:rgba(201,123,48,.11); }} .stage.good .srow.top {{ background:rgba(94,138,126,.13); }}
+.srow .sr {{ flex:0 0 1.7rem; text-align:right; font-family:'Lora',serif; color:{MUTED}; font-size:1.05rem; }}
 .srow.top .sr {{ color:{ORANGE}; }} .stage.good .srow.top .sr {{ color:{TEAL}; }}
-.srow .sn {{ flex:1 1 auto; min-width:0; font-size:.86rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-.srow .sv {{ flex:0 0 1.8rem; text-align:right; font-family:'Lora',serif; font-weight:700; font-size:.98rem; }}
-.smore {{ color:{MUTED}; font-size:.74rem; padding:.05rem .5rem; }}
+.srow .sn {{ flex:1 1 auto; min-width:0; font-size:1.18rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.srow .sv {{ flex:0 0 2.4rem; text-align:right; font-family:'Lora',serif; font-weight:700; font-size:1.4rem; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -375,7 +371,7 @@ if not err:
 updated_txt = captured.astimezone(TZ).strftime("%-I:%M %p") if captured is not None else "—"
 
 # --- header ----------------------------------------------------------------
-html = [f'<div class="board{" stages" if IS_STAGES else ""}">']
+html = ['<div class="board">']
 html.append(f"""
 <div class="hero">{CURVES}
 <div class="hero-row">
@@ -390,32 +386,24 @@ html.append(f"""
 if err:
     html.append(f'<div class="empty">Waiting on data — {err}</div>')
 elif IS_STAGES:
-    CAP = 6  # rows shown per stage so all 6 tables fit on screen; overflow -> "+N more"
     html.append('<div class="stagegrid">')
     # grid row 1: the two column headers (Outside | Within)
     for side_label, tone, data in stage_sides:
         side_total = sum(int(c) for _, rws in data for _, c in rws)
         html.append(f'<div class="ptitle {tone}">{side_label}<span class="pc">{side_total}</span></div>')
-    # grid rows 2..4: each stage as one row (outside cell, then within cell) so the
-    # grid keeps the two columns' stages aligned regardless of row counts.
+    # grid rows 2..4: each stage as one row (outside cell, then within cell). The grid
+    # keeps the two columns' stages aligned regardless of row counts — so the shorter
+    # column's stage simply gets padded and Pending Confirmation lines up on both sides.
+    # Every name is shown (no cap). No footer on this view.
     n_stages = len(stage_sides[0][2]) if stage_sides else 0
     for si in range(n_stages):
         for side_label, tone, data in stage_sides:
             stage_label, rws = data[si]
             stage_total = sum(int(c) for _, c in rws)
-            cell = [f'<div class="stage {tone}"><div class="sh">'
-                    f'<span class="sl">{stage_label}</span><span class="sc">{stage_total}</span></div>',
-                    stage_rows_html(rws[:CAP])]
-            if len(rws) > CAP:
-                cell.append(f'<div class="smore">+{len(rws) - CAP} more</div>')
-            cell.append('</div>')
-            html.append("".join(cell))
+            html.append(f'<div class="stage {tone}"><div class="sh">'
+                        f'<span class="sl">{stage_label}</span><span class="sc">{stage_total}</span></div>'
+                        f'{stage_rows_html(rws)}</div>')
     html.append('</div>')
-    foot_right = " &nbsp;·&nbsp; ".join(
-        f'<span class="{"gbig" if tone == "good" else "big"}">'
-        f'{sum(int(c) for _, rws in data for _, c in rws)}</span> {side_label.lower()}'
-        for side_label, tone, data in stage_sides)
-    html.append(f'<div class="foot"><div>If broken, contact Justin Maccabe</div><div>{foot_right}</div></div>')
 elif IS_COMBINED:
     html.append('<div class="split">')
     for sub, tone, df in panels:
