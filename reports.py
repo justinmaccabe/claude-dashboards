@@ -23,12 +23,18 @@ def _datediff_minutes(rows, a_key, b_key):
     matching the report (the <=15 / >15 filter excludes null-formula rows). NOTE: the
     HubSpot properties total_time_in_process_support_ticket /
     total_time_in_pending_confirmation_support_ticket do NOT exist — this DATEDIFF is
-    how the SLA time is actually obtained."""
+    how the SLA time is actually obtained.
+
+    Returns None (excluded) when the exit is missing OR precedes the entry (b < a). A
+    missing or earlier exit means the ticket has NOT validly left the stage this cycle —
+    it's still live, or it re-entered and the exit is stale from a prior cycle. Counting
+    those would let a negative time slip under the <=15 SLA (this is what over-counted
+    Hardeepika: 2n 11 -> 9 once the two re-entry tickets are dropped)."""
     out = {}
     for r in rows:
         a = to_ms(r.get(a_key))
         b = to_ms(r.get(b_key))
-        out[r["id"]] = None if (a is None or b is None) else (b - a) // 60000  # floor, like DATEDIFF
+        out[r["id"]] = None if (a is None or b is None or b < a) else (b - a) // 60000  # floor, like DATEDIFF
     return out
 
 
