@@ -42,13 +42,11 @@ P = {
     "date_entered_pending_action": "date_entered_in_process_pending_action",       # calc=False
     "ttfr": "time_to_first_agent_reply",               # number, calc=False (minutes)
     "create_date": "createdate",
-    # NOTE: the reports' "Total Time in <stage>" is a DATEDIFF formula (entered ->
-    # exited that stage), NOT a stored property — reproduced via reports._datediff_minutes.
-    # total_time_in_pending_confirmation_support_ticket does not exist at all; the PC leg
-    # now computes the DATEDIFF. total_time_in_process is kept only until the In Process
-    # leg is migrated the same way (it too does not exist and returns nothing).
+    # NOTE: the reports' "Total Time in <stage>" is a DATEDIFF formula (entered -> exited
+    # that stage), NOT a stored property — the properties total_time_in_process_support_ticket
+    # and total_time_in_pending_confirmation_support_ticket DO NOT EXIST. All three legs now
+    # compute the SLA time via reports._datediff_minutes.
     "first_agent_response": "hs_first_agent_message_sent_at",
-    "total_time_in_process": "total_time_in_process_support_ticket",
 }
 
 SUPPORT_PIPELINE_LABEL = "Support Ticket"

@@ -157,8 +157,10 @@ def _completed_pending_action(hs, within: bool):
 
 
 def _completed_in_process(hs, within: bool):
-    """2(h) within / 2(g) outside — In Process. SLA = Total Time In Process vs 240.
-    Attributed to assigned_to_support_ticket."""
+    """2(g) outside / 2(h) within — In Process, last 7 days. Same rule as the today leg,
+    windowed to the last 8 days: grouped by Date Entered In Process, action_item !=
+    'In Process', SLA = DATEDIFF(entered, exited) vs 15. Attributed to
+    assigned_to_support_ticket; outside also requires Assigned to Processing known."""
     pid, _ = hs.support_ids()
     cutoff = days_ago_ms(8)
     filters = [
@@ -170,9 +172,10 @@ def _completed_in_process(hs, within: bool):
     ]
     if not within:  # 2(g) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["total_time_in_process"]])
-    ttp = _resolve(hs, rows, P["total_time_in_process"])
-    return _classify(rows, ttp, 240, within,
+    rows = hs.search(filters, [P["assigned_to_support_ticket"],
+                               P["date_entered_in_process"], P["date_exited_in_process"]])
+    mins = _datediff_minutes(rows, P["date_entered_in_process"], P["date_exited_in_process"])
+    return _classify(rows, mins, 15, within,
                      lambda r: r.get(P["assigned_to_support_ticket"]), tag="completed IP")
 
 
@@ -253,24 +256,29 @@ def _today_pending_action(hs, within: bool):
 
 
 def _today_in_process(hs, within: bool):
-    """2(k)/2(l) — In Process exited today. Attributed to assigned_to_support_ticket;
-    SLA on Total Time In Process vs 15."""
+    """2(k)/2(l) — In Process, today's row. Verified against Sagar (3 within / 2 outside):
+    grouped by **Date Entered In Process**, action_item != 'In Process', create date < 8
+    days ago, SLA = DATEDIFF(entered, exited In Process) vs 15. Attributed to
+    assigned_to_support_ticket. Outside (2k) additionally requires Assigned to Processing
+    known (and reason not NBIN/Custodian, owner not Daniel)."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
+    cutoff = days_ago_ms(8)
     _, name_to_id = hs.owner_maps()
     daniel = name_to_id.get("daniel willett")
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["In Process"]},
         {"propertyName": P["assigned_to_support_ticket"], "operator": "HAS_PROPERTY"},
-        {"propertyName": P["date_exited_in_process"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_exited_in_process"], "operator": "LT", "value": t1},
+        {"propertyName": P["create_date"], "operator": "GT", "value": cutoff},
+        {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
     ]
     if not within:  # 2(k) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
     rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"],
-                               P["total_time_in_process"]])
-    ttp = _resolve(hs, rows, P["total_time_in_process"])
+                               P["date_entered_in_process"], P["date_exited_in_process"]])
+    mins = _datediff_minutes(rows, P["date_entered_in_process"], P["date_exited_in_process"])
 
     def keep(r):
         if daniel and str(r.get(P["owner"])) == daniel:           # owner ≠ Daniel Willett
@@ -281,7 +289,7 @@ def _today_in_process(hs, within: bool):
                 return False
         return True
 
-    return _classify(rows, ttp, 15, within,
+    return _classify(rows, mins, 15, within,
                      lambda r: r.get(P["assigned_to_support_ticket"]), keep=keep, tag="today IP")
 
 
