@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "22Jul-ip+pc"
+BUILD = "22Jul-ip+pc-b"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {

@@ -266,21 +266,26 @@ def _today_in_process(hs, within: bool):
     cutoff = days_ago_ms(8)
     _, name_to_id = hs.owner_maps()
     daniel = name_to_id.get("daniel willett")
+    # NOTE: HubSpot Search caps a filter group at 6 filters. "create date < 8 days"
+    # is applied client-side in keep() (not as a 7th filter) so the Outside variant
+    # (which adds assigned_to_processing) stays within the cap.
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["In Process"]},
         {"propertyName": P["assigned_to_support_ticket"], "operator": "HAS_PROPERTY"},
-        {"propertyName": P["create_date"], "operator": "GT", "value": cutoff},
         {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
         {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
     ]
     if not within:  # 2(k) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
     rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"],
-                               P["date_entered_in_process"], P["date_exited_in_process"]])
+                               P["create_date"], P["date_entered_in_process"], P["date_exited_in_process"]])
     mins = _datediff_minutes(rows, P["date_entered_in_process"], P["date_exited_in_process"])
 
     def keep(r):
+        c = to_ms(r.get(P["create_date"]))                        # create date < 8 days ago
+        if c is None or c <= cutoff:
+            return False
         if daniel and str(r.get(P["owner"])) == daniel:           # owner ≠ Daniel Willett
             return False
         if not within:                                            # 2(k): reason ∌ nbin/custodian
