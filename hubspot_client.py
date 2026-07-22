@@ -38,13 +38,17 @@ P = {
     "date_entered_in_review": "date_entered_in_review_pending_action",             # calc=False; label "Date entered In Review (Support Ticket)"
     "date_exited_in_process": "date_exited_in_process_support_ticket",             # calc=False
     "date_exited_pending_conf": "date_exited_pending_confirmation_support_ticket",  # calc=False
+    "date_entered_pending_conf": "date_entered_pending_confirmation_support_ticket",  # calc=False
     "date_entered_pending_action": "date_entered_in_process_pending_action",       # calc=False
     "ttfr": "time_to_first_agent_reply",               # number, calc=False (minutes)
     "create_date": "createdate",
-    # calculated (calc=True) — must be read + filtered client-side:
+    # NOTE: the reports' "Total Time in <stage>" is a DATEDIFF formula (entered ->
+    # exited that stage), NOT a stored property — reproduced via reports._datediff_minutes.
+    # total_time_in_pending_confirmation_support_ticket does not exist at all; the PC leg
+    # now computes the DATEDIFF. total_time_in_process is kept only until the In Process
+    # leg is migrated the same way (it too does not exist and returns nothing).
     "first_agent_response": "hs_first_agent_message_sent_at",
     "total_time_in_process": "total_time_in_process_support_ticket",
-    "total_time_pending_conf": "total_time_in_pending_confirmation_support_ticket",
 }
 
 SUPPORT_PIPELINE_LABEL = "Support Ticket"

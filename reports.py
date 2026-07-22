@@ -15,19 +15,27 @@ import sys
 from hubspot_client import HubSpot, P, days_ago_ms, today_bounds_ms, to_ms, to_num
 
 
-def _pa_minutes(rows):
-    """Report 2(e)/2(f)'s 'Total Time in Pending action' formula, reproduced exactly:
-      DATEDIFF('MINUTE', date_entered_in_review_pending_action, date_entered_in_process_support_ticket)
-    i.e. whole minutes between entering In Review and entering In Process. Both are
-    stored date properties (returned by Search). {id: minutes|None}; None (either
-    timestamp missing) -> unclassifiable, matching the report (the >15 / <=15 filter
-    excludes null-formula rows)."""
+def _datediff_minutes(rows, a_key, b_key):
+    """The reports' 'Total Time in <stage>' formula, reproduced:
+      DATEDIFF('MINUTE', <entered stage>, <exited stage>)
+    i.e. whole (floored) minutes in the stage. Both are stored date properties returned
+    by Search. {id: minutes|None}; None when either timestamp is missing -> unclassifiable,
+    matching the report (the <=15 / >15 filter excludes null-formula rows). NOTE: the
+    HubSpot properties total_time_in_process_support_ticket /
+    total_time_in_pending_confirmation_support_ticket do NOT exist — this DATEDIFF is
+    how the SLA time is actually obtained."""
     out = {}
     for r in rows:
-        a = to_ms(r.get(P["date_entered_in_review"]))
-        b = to_ms(r.get(P["date_entered_in_process"]))
+        a = to_ms(r.get(a_key))
+        b = to_ms(r.get(b_key))
         out[r["id"]] = None if (a is None or b is None) else (b - a) // 60000  # floor, like DATEDIFF
     return out
+
+
+def _pa_minutes(rows):
+    """Pending Action time = DATEDIFF(entered In Review, entered In Process); exiting
+    Pending Action == entering In Process, so this is the report 2(e)/2(f) formula."""
+    return _datediff_minutes(rows, P["date_entered_in_review"], P["date_entered_in_process"])
 
 
 def _resolve(hs, rows, prop):
@@ -169,22 +177,24 @@ def _completed_in_process(hs, within: bool):
 
 
 def _completed_pending_conf(hs, within: bool):
-    """2(j) within / 2(i) outside — Pending Confirmation. SLA = Total Time in Pending
-    Confirmation vs 15. Attributed to assigned_to_final_review."""
+    """2(i) outside / 2(j) within — Pending Confirmation, last 7 days. Same rule as the
+    today leg, windowed to the last 8 days: grouped by Date Entered Pending Confirmation,
+    action_item != 'Pending Confirmation', SLA = DATEDIFF(entered, exited) vs 15.
+    Attributed to assigned_to_final_review."""
     pid, _ = hs.support_ids()
     cutoff = days_ago_ms(8)
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
-        {"propertyName": P["action_item"], "operator": "IN", "values": ["Completed"]},
-        {"propertyName": P["date_exited_pending_conf"], "operator": "HAS_PROPERTY"},
-        {"propertyName": P["date_exited_pending_conf"], "operator": "GT", "value": cutoff},
+        {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Confirmation"]},
+        {"propertyName": P["date_entered_pending_conf"], "operator": "HAS_PROPERTY"},
+        {"propertyName": P["date_entered_pending_conf"], "operator": "GT", "value": cutoff},
     ]
     if within:  # 2(j) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
     rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"],
-                               P["total_time_pending_conf"]])
-    ttc = _resolve(hs, rows, P["total_time_pending_conf"])
-    return _classify(rows, ttc, 15, within,
+                               P["date_entered_pending_conf"], P["date_exited_pending_conf"]])
+    mins = _datediff_minutes(rows, P["date_entered_pending_conf"], P["date_exited_pending_conf"])
+    return _classify(rows, mins, 15, within,
                      lambda r: (r.get(P["assigned_to_final_review"])
                                 or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
                      tag="completed PC")
@@ -276,22 +286,25 @@ def _today_in_process(hs, within: bool):
 
 
 def _today_pending_conf(hs, within: bool):
-    """2(m)/2(n) — Pending Confirmation exited today. Attributed to
-    assigned_to_final_review; SLA on Total Time in Pending Confirmation vs 15."""
+    """2(m)/2(n) — Pending Confirmation, today's row. Matches the report (verified against
+    Hardeepika = 5 within / 1 outside): grouped by **Date Entered Pending Confirmation**,
+    the ticket must no longer be in Pending Confirmation (action_item != 'Pending
+    Confirmation'), SLA = DATEDIFF(entered, exited Pending Confirmation) vs 15. Attributed
+    to assigned_to_final_review."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
-        {"propertyName": P["action_item"], "operator": "IN", "values": ["Completed"]},
-        {"propertyName": P["date_exited_pending_conf"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_exited_pending_conf"], "operator": "LT", "value": t1},
+        {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Confirmation"]},
+        {"propertyName": P["date_entered_pending_conf"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_entered_pending_conf"], "operator": "LT", "value": t1},
     ]
     if within:  # 2(n) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
     rows = hs.search(filters, [P["assigned_to_final_review"], P["assigned_to_support_ticket"],
-                               P["total_time_pending_conf"]])
-    ttc = _resolve(hs, rows, P["total_time_pending_conf"])
-    return _classify(rows, ttc, 15, within,
+                               P["date_entered_pending_conf"], P["date_exited_pending_conf"]])
+    mins = _datediff_minutes(rows, P["date_entered_pending_conf"], P["date_exited_pending_conf"])
+    return _classify(rows, mins, 15, within,
                      lambda r: (r.get(P["assigned_to_final_review"])
                                 or r.get(P["assigned_to_support_ticket"]) or r.get(P["assigned_to"])),
                      tag="today PC")
