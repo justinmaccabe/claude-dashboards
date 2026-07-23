@@ -253,24 +253,29 @@ def build_completed_stage(hs: HubSpot, within: bool):
 
 # ---------------------------------------------------------------------------
 # Completed TODAY (2k/2l In Process, 2m/2n Pending Confirmation, 2e/2f Pending
-# Action's today row). Same shape as the 7-day boards but keyed off
-# "Date <Entered/Exited> <stage> is Today"; In-Process SLA splits at 15 (not 240).
+# Action's today row). Keyed off the day each ticket COMPLETED the stage — i.e.
+# "Date Exited <stage> is Today" (PA completes by entering In Process) — matching
+# HubSpot's 'Completed Today' report, which counts by completion day, not entry day.
+# No 'create date < 8 days' filter on the today columns. In-Process SLA splits at 15.
+# Reconciled 2026-07-23 against HubSpot for Hardeepika (Jul-22 Outside = 20:
+# 6 In Process + 14 Pending Confirmation); entry-day grouping had undercounted her to 12.
 # ---------------------------------------------------------------------------
 def _today_pending_action(hs, within: bool):
-    """2(e)/2(f) 'today row' — the report groups by 'Date entered In Review (Support
-    Ticket)'; today's row = tickets that entered In Review today. Same filters/metric
-    as the 7-day report, plus the today window on date_entered_in_review. Attributed
-    to assigned_to_processing."""
+    """2(e)/2(f) 'today row' — COMPLETED today. The board groups the today columns by
+    the day a ticket *left* (completed) the stage, matching HubSpot's 'Completed Today'
+    report — NOT the day it entered. Exiting Pending Action == entering In Process, so
+    the completion timestamp is date_entered_in_process; today's row = tickets that
+    moved into In Process today. No 'create date < 8 days' filter (HubSpot's today
+    columns count older tickets that complete today too). SLA on the Pending-Action
+    formula (<=15 within / >15 outside). Attributed to assigned_to_processing."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
-    cutoff = days_ago_ms(8)
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Action"]},
         {"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"},
-        {"propertyName": P["create_date"], "operator": "GT", "value": cutoff},
-        {"propertyName": P["date_entered_in_review"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_entered_in_review"], "operator": "LT", "value": t1},
+        {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
     ]
     rows = hs.search(filters, _PA_PROPS)
     return _classify(rows, _pa_minutes(rows), 15, within,
@@ -278,61 +283,54 @@ def _today_pending_action(hs, within: bool):
 
 
 def _today_in_process(hs, within: bool):
-    """2(k)/2(l) — In Process, today's row. Verified against Sagar (3 within / 2 outside):
-    grouped by **Date Entered In Process**, action_item != 'In Process', create date < 8
-    days ago, SLA = DATEDIFF(entered, exited In Process) vs 15. Attributed to
-    assigned_to_support_ticket. Outside (2k) additionally requires Assigned to Processing
-    known (and reason not NBIN/Custodian, owner not Daniel)."""
+    """2(k)/2(l) — In Process, COMPLETED today. Grouped by **Date Exited In Process**
+    (the day the ticket left the stage = the day it was completed), matching HubSpot's
+    'Completed Today'. action_item != 'In Process', SLA = DATEDIFF(entered, exited In
+    Process) vs 15. No 'create date < 8 days' filter — a ticket opened weeks ago that
+    finishes In Process today still counts today. Attributed to assigned_to_support_ticket.
+    Outside (2k) additionally requires Assigned to Processing known (and reason not
+    NBIN/Custodian, owner not Daniel)."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
-    cutoff = days_ago_ms(8)
     _, name_to_id = hs.owner_maps()
     daniel = name_to_id.get("daniel willett")
-    # NOTE: HubSpot Search caps a filter group at 6 filters. "create date < 8 days"
-    # is applied client-side in keep() (not as a 7th filter) so the Outside variant
-    # (which adds assigned_to_processing) stays within the cap.
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["In Process"]},
         {"propertyName": P["assigned_to_support_ticket"], "operator": "HAS_PROPERTY"},
-        {"propertyName": P["date_entered_in_process"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_entered_in_process"], "operator": "LT", "value": t1},
+        {"propertyName": P["date_exited_in_process"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_exited_in_process"], "operator": "LT", "value": t1},
     ]
     if not within:  # 2(k) also requires assigned_to_processing known
         filters.append({"propertyName": P["assigned_to_processing"], "operator": "HAS_PROPERTY"})
-    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"], P["in_process_reason"],
-                               P["create_date"], P["date_entered_in_process"], P["date_exited_in_process"]])
+    rows = hs.search(filters, [P["assigned_to_support_ticket"], P["owner"],
+                               P["date_entered_in_process"], P["date_exited_in_process"]])
     mins = _datediff_minutes(rows, P["date_entered_in_process"], P["date_exited_in_process"])
 
+    # NBIN/Custodian reason exclusion is NOT part of the Completed report (only the
+    # Open-Outside board 2c uses it): a ticket that finished In Process today counts
+    # even if it had been waiting on NBIN. Reconciled against HubSpot 2026-07-23 —
+    # keeping the two NBIN-reason tickets is what makes Hardeepika = 20 (not 18).
     def keep(r):
-        c = to_ms(r.get(P["create_date"]))                        # create date < 8 days ago
-        if c is None or c <= cutoff:
-            return False
-        if daniel and str(r.get(P["owner"])) == daniel:           # owner ≠ Daniel Willett
-            return False
-        if not within:                                            # 2(k): reason ∌ nbin/custodian
-            rz = (r.get(P["in_process_reason"]) or "").lower()
-            if "nbin" in rz or "custodian" in rz:
-                return False
-        return True
+        return not (daniel and str(r.get(P["owner"])) == daniel)   # owner ≠ Daniel Willett
 
     return _classify(rows, mins, 15, within,
                      lambda r: r.get(P["assigned_to_support_ticket"]), keep=keep, tag="today IP")
 
 
 def _today_pending_conf(hs, within: bool):
-    """2(m)/2(n) — Pending Confirmation, today's row. Matches the report (verified against
-    Hardeepika = 5 within / 1 outside): grouped by **Date Entered Pending Confirmation**,
-    the ticket must no longer be in Pending Confirmation (action_item != 'Pending
-    Confirmation'), SLA = DATEDIFF(entered, exited Pending Confirmation) vs 15. Attributed
-    to assigned_to_final_review."""
+    """2(m)/2(n) — Pending Confirmation, COMPLETED today. Grouped by **Date Exited Pending
+    Confirmation** (the day the ticket left the stage = the day it was completed), matching
+    HubSpot's 'Completed Today'. The ticket must no longer be in Pending Confirmation
+    (action_item != 'Pending Confirmation'), SLA = DATEDIFF(entered, exited Pending
+    Confirmation) vs 15. Attributed to assigned_to_final_review."""
     pid, _ = hs.support_ids()
     t0, t1 = today_bounds_ms()
     filters = [
         {"propertyName": P["pipeline"], "operator": "EQ", "value": pid},
         {"propertyName": P["action_item"], "operator": "NOT_IN", "values": ["Pending Confirmation"]},
-        {"propertyName": P["date_entered_pending_conf"], "operator": "GTE", "value": t0},
-        {"propertyName": P["date_entered_pending_conf"], "operator": "LT", "value": t1},
+        {"propertyName": P["date_exited_pending_conf"], "operator": "GTE", "value": t0},
+        {"propertyName": P["date_exited_pending_conf"], "operator": "LT", "value": t1},
     ]
     if within:  # 2(n) requires assigned_to_final_review known
         filters.append({"propertyName": P["assigned_to_final_review"], "operator": "HAS_PROPERTY"})
