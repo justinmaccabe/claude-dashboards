@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "31Jul-dailyreport2"
+BUILD = "31Jul-nbin"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -227,8 +227,40 @@ def _daily_data(_tok_tail: str):
         _tbl("Advisor Support Dashboard",
              reports.build_today(hs, True), reports.build_today(hs, False),
              reports.build_open_outside(hs)),
+        _advisor_support_nbin(hs),
     ]
     return tables, dt.datetime.now(dt.timezone.utc)
+
+
+def _advisor_support_nbin(hs):
+    """Advisor Support Tickets With NBIN (reports 6a/6b). Support tickets currently
+    sent to NBIN, awaiting NBIN, not Closed. Split by Time to Send to NBIN =
+    DATEDIFF(MINUTE, date_entered_in_process, sent_to_nbin) <= 15 (within) / > 15 (outside).
+    Verified against HubSpot 2026-07-31: 13 within / 34 outside / 47 total."""
+    from hubspot_client import to_ms
+    CLOSED = "208647293"  # Support pipeline "Closed" stage
+    filters = [
+        {"propertyName": reports.P["pipeline"], "operator": "EQ", "value": "117451896"},
+        {"propertyName": "sent_to_nbin__date__time", "operator": "HAS_PROPERTY"},
+        {"propertyName": "received_response_from_nbin", "operator": "NOT_HAS_PROPERTY"},
+        {"propertyName": "hs_pipeline_stage", "operator": "NEQ", "value": CLOSED},
+    ]
+    rows = hs.search(filters, ["date_entered_in_process_support_ticket", "sent_to_nbin__date__time"])
+    within = outside = 0
+    for r in rows:
+        a = to_ms(r.get("date_entered_in_process_support_ticket"))
+        b = to_ms(r.get("sent_to_nbin__date__time"))
+        if a is None or b is None:
+            continue  # DATEDIFF null -> in neither 6a nor 6b
+        mins = int((b - a) / 60000)  # DATEDIFF("MINUTE") truncates toward zero
+        if mins <= 15:
+            within += 1
+        else:
+            outside += 1
+    return {"title": "Advisor Support Tickets With NBIN",
+            "columns": ["Actioned Within SLA", "Actioned Outside SLA",
+                        "Total Advisor Support Tickets with NBIN"],
+            "flat_row": [within, outside, within + outside]}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -301,7 +333,16 @@ def _render_daily_report():
     updated = captured.astimezone(TZ).strftime("%-I:%M %p")
     now_l = dt.datetime.now(TZ)
     st.markdown(_REPORT_CSS, unsafe_allow_html=True)
-    cols = ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"]
+    people_cols = ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"]
+
+    def _tone_for(colname):
+        c = colname.lower()
+        if "within" in c:
+            return "in"
+        if "outside" in c:
+            return "out"
+        return None
+
     parts = ['<div class="doc">',
              f'<div class="dhdr"><div class="b">OPTIMIZE<span>FINANCIAL GROUP</span></div>'
              f'<div class="r"><div class="t">Daily SLA Report</div><div class="s">Tickets Outside SLA</div>'
@@ -310,19 +351,28 @@ def _render_daily_report():
              '<div class="dintro">Please see the update below for tickets outside SLA. '
              'These figures are pulled live from HubSpot.</div>']
     for t in tables:
-        thead = (f'<th class="l">{cols[0]}</th>' +
-                 "".join(f"<th>{c}</th>" for c in cols[1:]))
-        body = []
-        for i, r in enumerate(t["rows"]):
-            body.append('<tr>' + f'<td class="l">{r[0]}</td>' +
-                        _num_cell(r[1], "in") + _num_cell(r[2], "out") + _num_cell(r[3], "out") + '</tr>')
-        tot = t["total"]
-        body.append('<tr class="tot"><td class="l">Total</td>' +
-                    f'<td class="n">{tot[0]}</td><td class="n">{tot[1]}</td><td class="n">{tot[2]}</td></tr>')
+        if "flat_row" in t:
+            # aggregate table (e.g. NBIN): custom columns, one row of numbers, no Name column
+            fcols = t["columns"]
+            thead = "".join(f"<th>{c}</th>" for c in fcols)
+            tds = "".join(_num_cell(v, _tone_for(fcols[i]) or "plain") for i, v in enumerate(t["flat_row"]))
+            body = f"<tr>{tds}</tr>"
+        else:
+            cols = people_cols
+            thead = (f'<th class="l">{cols[0]}</th>' +
+                     "".join(f"<th>{c}</th>" for c in cols[1:]))
+            rows_html = []
+            for r in t["rows"]:
+                rows_html.append('<tr>' + f'<td class="l">{r[0]}</td>' +
+                                 _num_cell(r[1], "in") + _num_cell(r[2], "out") + _num_cell(r[3], "out") + '</tr>')
+            tot = t["total"]
+            rows_html.append('<tr class="tot"><td class="l">Total</td>' +
+                             f'<td class="n">{tot[0]}</td><td class="n">{tot[1]}</td><td class="n">{tot[2]}</td></tr>')
+            body = "".join(rows_html)
         parts.append(f'<div class="dcap">{t["title"]}<span class="badge">LIVE</span></div>'
-                     f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{"".join(body)}</tbody></table>')
-    parts.append('<div class="dnote">Advisor Support is live. Client Service, Account Services, '
-                 'Transfers and NBIN are being wired next.</div>')
+                     f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{body}</tbody></table>')
+    parts.append('<div class="dnote">Advisor Support (incl. NBIN) is live. Client Service, '
+                 'Account Services and Transfers are being wired next.</div>')
     parts.append('</div></div>')
     st.markdown("\n".join(parts), unsafe_allow_html=True)
 
