@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "23Jul-exitday"
+BUILD = "31Jul-dailyreport"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -181,6 +181,190 @@ if _debug_requested():
         _render_reconciliation()
     except Exception as e:
         st.error(f"debug view error: {e}")
+    st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Daily Report view  ( ?report=daily-report )  and  Inventory view ( ?report=inventory )
+# A document-style render of the daily SLA email, pulled LIVE from HubSpot. Only the
+# tables that are genuinely live are shown (Advisor Support). Inventory lists every
+# HubSpot list + pipeline so the remaining dashboards can be mapped and added.
+# ---------------------------------------------------------------------------
+def _view_key():
+    try:
+        return str(st.query_params.get("report") or "")
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _daily_data(_tok_tail: str):
+    from hubspot_client import HubSpot
+    hs = HubSpot(token=_token())
+
+    def _tbl(title, w, o, oo):
+        names = sorted(set(w) | set(o) | set(oo))
+        rows = [[n, w.get(n, 0), o.get(n, 0), oo.get(n, 0)] for n in names]
+        return {"title": title, "rows": rows,
+                "total": [sum(w.values()), sum(o.values()), sum(oo.values())]}
+
+    # Advisor Support (Pending Action) — today's completed PA + currently-open PA outside
+    w_pa = reports._sum_per_person(hs, [reports._today_pending_action(hs, True)])
+    o_pa = reports._sum_per_person(hs, [reports._today_pending_action(hs, False)])
+    open_pa = {}
+    seg = hs.sla_segments().get("Pending Action")
+    if seg:
+        id_to_name, _ = hs.owner_maps()
+        for p in hs.batch_read(hs.list_members(seg), [reports.P["assigned_to_processing"]]).values():
+            oid = p.get(reports.P["assigned_to_processing"])
+            if oid:
+                nm = id_to_name.get(str(oid), str(oid))
+                open_pa[nm] = open_pa.get(nm, 0) + 1
+
+    # Advisor Support Dashboard — all three stages completed today + open outside (2b+2c+2d)
+    tables = [
+        _tbl("Advisor Support (Pending Action) — Daily Stats", w_pa, o_pa, open_pa),
+        _tbl("Advisor Support Dashboard",
+             reports.build_today(hs, True), reports.build_today(hs, False),
+             reports.build_open_outside(hs)),
+    ]
+    return tables, dt.datetime.now(dt.timezone.utc)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _inventory_data(_tok_tail: str):
+    from hubspot_client import HubSpot
+    hs = HubSpot(token=_token())
+    pipes = hs._req("GET", "/crm/v3/pipelines/tickets").get("results", [])
+    lists, offset = [], 0
+    while True:
+        data = hs._req("POST", "/crm/v3/lists/search", json={"query": "", "count": 250, "offset": offset})
+        batch = data.get("lists", [])
+        lists.extend(batch)
+        if not data.get("hasMore") or not batch:
+            break
+        offset = data.get("offset", offset + len(batch))
+    return pipes, lists, dt.datetime.now(dt.timezone.utc)
+
+
+_REPORT_CSS = f"""
+<style>
+#MainMenu, header, footer {{ visibility: hidden; }}
+html, body, .stApp {{ background:#EEF1F4 !important; overflow:auto !important; }}
+.block-container {{ padding:1.2rem 1rem 3rem; max-width:1000px; }}
+.doc {{ font-family:'Montserrat',sans-serif; background:#fff; border-radius:14px;
+        box-shadow:0 8px 30px rgba(20,30,45,.12); overflow:hidden; }}
+.dhdr {{ background:#FBF8F0; border-bottom:3px solid {ORANGE}; padding:22px 30px;
+         display:flex; justify-content:space-between; align-items:center; }}
+.dhdr .b {{ font-family:'Lora',serif; font-weight:700; font-size:22px; letter-spacing:2px; color:{NAVY}; }}
+.dhdr .b span {{ display:block; font-size:9px; letter-spacing:4px; margin-top:3px; }}
+.dhdr .r {{ text-align:right; }}
+.dhdr .r .t {{ font-family:'Lora',serif; font-size:19px; color:{NAVY}; font-weight:700; }}
+.dhdr .r .s {{ font-size:10px; letter-spacing:2px; text-transform:uppercase; color:{ORANGE}; font-weight:700; margin-top:3px; }}
+.dhdr .r .d {{ font-size:11px; color:#8A94A0; margin-top:4px; }}
+.dbody {{ padding:20px 30px 26px; }}
+.dintro {{ font-size:12.5px; color:#3A4B60; margin-bottom:18px; }}
+.dcap {{ font-family:'Lora',serif; font-size:15px; font-weight:700; color:{NAVY};
+         border-bottom:2px solid {ORANGE}; padding-bottom:6px; margin:22px 0 0; }}
+table.d {{ width:100%; border-collapse:collapse; font-size:12.5px; margin-top:0; }}
+table.d th {{ background:{NAVY}; color:#fff; font-size:9px; letter-spacing:.5px; text-transform:uppercase;
+              font-weight:700; padding:8px 10px; text-align:right; }}
+table.d th.l {{ text-align:left; }}
+table.d td {{ padding:7px 10px; border-bottom:1px solid #E7E0D2; }}
+table.d td.l {{ text-align:left; color:{NAVY}; font-weight:600; }}
+table.d td.n {{ text-align:right; font-variant-numeric:tabular-nums; color:#3A4B60; }}
+table.d tr:nth-child(even) td {{ background:#FAF7EF; }}
+table.d tr.tot td {{ border-top:2px solid {NAVY}; background:#FBF8F0; color:{NAVY}; font-weight:700; }}
+.dnote {{ font-size:11px; color:#8A94A0; margin-top:14px; text-align:center; }}
+.badge {{ display:inline-block; font-size:10px; font-weight:700; letter-spacing:.5px; color:{TEAL};
+          border:1px solid {TEAL}; border-radius:20px; padding:2px 10px; margin-left:8px; vertical-align:middle; }}
+</style>
+"""
+
+
+def _num_cell(v, kind):
+    v = int(v)
+    style = ""
+    if kind == "out" and v > 0:
+        style = f"color:{ORANGE};font-weight:700"
+    elif kind == "in" and v > 0:
+        style = f"color:{TEAL};font-weight:600"
+    return f'<td class="n" style="{style}">{v}</td>'
+
+
+def _render_daily_report():
+    tok = _token()
+    if not tok:
+        st.error("No HUBSPOT_TOKEN configured on the app.")
+        return
+    tables, captured = _daily_data(tok[-8:])
+    updated = captured.astimezone(TZ).strftime("%-I:%M %p")
+    now_l = dt.datetime.now(TZ)
+    st.markdown(_REPORT_CSS, unsafe_allow_html=True)
+    cols = ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"]
+    parts = ['<div class="doc">',
+             f'<div class="dhdr"><div class="b">OPTIMIZE<span>FINANCIAL GROUP</span></div>'
+             f'<div class="r"><div class="t">Daily SLA Report</div><div class="s">Tickets Outside SLA</div>'
+             f'<div class="d">{now_l:%A, %B %-d, %Y} · synced {updated} · live</div></div></div>',
+             '<div class="dbody">',
+             '<div class="dintro">Please see the update below for tickets outside SLA. '
+             'These figures are pulled live from HubSpot.</div>']
+    for t in tables:
+        thead = (f'<th class="l">{cols[0]}</th>' +
+                 "".join(f"<th>{c}</th>" for c in cols[1:]))
+        body = []
+        for i, r in enumerate(t["rows"]):
+            body.append('<tr>' + f'<td class="l">{r[0]}</td>' +
+                        _num_cell(r[1], "in") + _num_cell(r[2], "out") + _num_cell(r[3], "out") + '</tr>')
+        tot = t["total"]
+        body.append('<tr class="tot"><td class="l">Total</td>' +
+                    f'<td class="n">{tot[0]}</td><td class="n">{tot[1]}</td><td class="n">{tot[2]}</td></tr>')
+        parts.append(f'<div class="dcap">{t["title"]}<span class="badge">LIVE</span></div>'
+                     f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{"".join(body)}</tbody></table>')
+    parts.append('<div class="dnote">Advisor Support is live. Client Service, Account Services, '
+                 'Transfers and NBIN are being wired next — open ?report=inventory to help map them.</div>')
+    parts.append('</div></div>')
+    st.markdown("\n".join(parts), unsafe_allow_html=True)
+
+
+def _render_inventory():
+    tok = _token()
+    if not tok:
+        st.error("No HUBSPOT_TOKEN configured on the app.")
+        return
+    pipes, lists, captured = _inventory_data(tok[-8:])
+    st.markdown("<style>#MainMenu,header,footer{visibility:hidden;} "
+                ".stApp{background:#EEF1F4;}</style>", unsafe_allow_html=True)
+    st.title("HubSpot list & pipeline inventory")
+    st.caption("Screenshot or copy the four dashboards' lists (Client Service, Account "
+               "Services, Transfers, NBIN) and send them to Claude to wire them live.")
+    OBJ = {"0-5": "Ticket", "0-1": "Contact", "0-2": "Company", "0-3": "Deal"}
+    st.subheader(f"Lists ({len(lists)})")
+    st.dataframe(pd.DataFrame(
+        [{"listId": l.get("listId"), "name": l.get("name"),
+          "object": OBJ.get(l.get("objectTypeId"), l.get("objectTypeId")),
+          "size": l.get("size", "")} for l in
+         sorted(lists, key=lambda x: (x.get("objectTypeId", ""), (x.get("name") or "").lower()))],
+        columns=["listId", "name", "object", "size"]),
+        use_container_width=True, hide_index=True, height=520)
+    st.subheader(f"Ticket pipelines ({len(pipes)})")
+    st.dataframe(pd.DataFrame([{"id": p.get("id"), "label": p.get("label")} for p in pipes],
+                              columns=["id", "label"]),
+                 use_container_width=True, hide_index=True)
+
+
+_VIEW = _view_key()
+if _VIEW == "daily-report":
+    try:
+        _render_daily_report()
+    except Exception as e:
+        st.error(f"Daily report error: {e}")
+    st.stop()
+if _VIEW == "inventory":
+    try:
+        _render_inventory()
+    except Exception as e:
+        st.error(f"Inventory error: {e}")
     st.stop()
 
 
