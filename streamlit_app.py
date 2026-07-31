@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "31Jul-dailyreport"
+BUILD = "31Jul-dailyreport2"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -322,9 +322,30 @@ def _render_daily_report():
         parts.append(f'<div class="dcap">{t["title"]}<span class="badge">LIVE</span></div>'
                      f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{"".join(body)}</tbody></table>')
     parts.append('<div class="dnote">Advisor Support is live. Client Service, Account Services, '
-                 'Transfers and NBIN are being wired next — open ?report=inventory to help map them.</div>')
+                 'Transfers and NBIN are being wired next.</div>')
     parts.append('</div></div>')
     st.markdown("\n".join(parts), unsafe_allow_html=True)
+
+    # Setup helper: show the SLA-related lists in this portal so the remaining four
+    # dashboards can be wired to their exact source. Screenshot this and send to Claude.
+    try:
+        _, lists, _ = _inventory_data(tok[-8:])
+        sla = [l for l in lists
+               if any(k in (l.get("name") or "").lower() for k in ("sla", "outside", "nbin", "custodian", "review"))]
+        st.markdown("---")
+        st.markdown("#### ⚙︎ Setup — send this to Claude to finish the remaining tables")
+        st.caption("You don't need to read or understand this. Just screenshot the table below "
+                   "(or the whole page) and send it over. It lists the HubSpot lists that define "
+                   "the SLA counts for Client Service, Account Services, Transfers and NBIN.")
+        st.dataframe(
+            pd.DataFrame([{"listId": l.get("listId"), "list name": l.get("name"),
+                           "size": l.get("size", "")} for l in
+                          sorted(sla, key=lambda x: (x.get("name") or "").lower())],
+                        columns=["listId", "list name", "size"]),
+            use_container_width=True, hide_index=True, height=min(430, 60 + 35 * max(len(sla), 1)))
+        st.caption(f"{len(sla)} SLA-related lists found. Full inventory: add ?report=inventory to the URL.")
+    except Exception as e:
+        st.caption(f"(Setup helper unavailable: {e})")
 
 
 def _render_inventory():
