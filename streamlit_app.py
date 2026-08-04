@@ -36,7 +36,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "04Aug-acctsvc"
+BUILD = "04Aug-transfers"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -242,7 +242,58 @@ def _daily_data(_tok_tail: str):
         tables.append({"title": "Account Services Dashboard",
                        "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
                        "rows": [], "total": ["Total", 0, 0, 0], "note": f"(temporarily unavailable: {e})"})
+    try:
+        tables.append(_transfers(hs))
+    except Exception as e:
+        tables.append({"title": "Transfers (Pending Review)",
+                       "columns": ["Name", "Tickets Outside SLA", "Pending Review — Due Today"],
+                       "rows": [], "total": ["Total", 0, 0], "note": f"(temporarily unavailable: {e})"})
     return tables, dt.datetime.now(dt.timezone.utc)
+
+
+def _transfers(hs):
+    """Transfers (Pending Review). Attributed to Assigned to Processing.
+    'Pending Review — Due Today' = report 3a: request_type 'Initiate a transfer',
+    Follow Up Date (Fixed Date) is Today (date-only field -> UTC-midnight window),
+    action_item != Cancelled. Verified vs HubSpot 2026-08-04 = 7.
+    'Tickets Outside SLA' = report 3d: request_type 'Initiate a transfer', action_item
+    == 'Pending Final Review' (label 'Pending Review'), Follow Up Date more than 0 days
+    ago (before today). Verified = 1."""
+    import datetime as _dt
+    from hubspot_client import TZ
+    today = _dt.datetime.now(TZ).date()
+    start = _dt.datetime(today.year, today.month, today.day, tzinfo=_dt.timezone.utc)
+    t0 = int(start.timestamp() * 1000)
+    t1 = int((start + _dt.timedelta(days=1)).timestamp() * 1000)
+    id_to_name, _ = hs.owner_maps()
+
+    def _tally(filters):
+        out = {}
+        for r in hs.search(filters, ["assigned_to_processing"]):
+            oid = r.get("assigned_to_processing")
+            if oid:
+                nm = id_to_name.get(str(oid), str(oid))
+                out[nm] = out.get(nm, 0) + 1
+        return out
+
+    due = _tally([  # 3a
+        {"propertyName": "request_type", "operator": "EQ", "value": "Initiate a transfer"},
+        {"propertyName": "follow_up_date_fixed_date", "operator": "GTE", "value": t0},
+        {"propertyName": "follow_up_date_fixed_date", "operator": "LT", "value": t1},
+        {"propertyName": "action_item", "operator": "NEQ", "value": "Cancelled"},
+    ])
+    outside = _tally([  # 3d
+        {"propertyName": "request_type", "operator": "EQ", "value": "Initiate a transfer"},
+        {"propertyName": "action_item", "operator": "EQ", "value": "Pending Final Review"},
+        {"propertyName": "follow_up_date", "operator": "LT", "value": t0},
+        {"propertyName": "follow_up_date", "operator": "HAS_PROPERTY"},
+    ])
+    names = sorted(set(due) | set(outside))
+    rows = [[n, outside.get(n, 0), due.get(n, 0)] for n in names]
+    total = ["Total", sum(outside.values()), sum(due.values())]
+    return {"title": "Transfers (Pending Review)",
+            "columns": ["Name", "Tickets Outside SLA", "Pending Review — Due Today"],
+            "rows": rows, "total": total}
 
 
 # --- Account Services Dashboard (reports 5c / 5e / 5f) -----------------------
@@ -505,29 +556,38 @@ def _render_daily_report():
              '<div class="dintro">Please see the update below for tickets outside SLA. '
              'These figures are pulled live from HubSpot.</div>']
     for t in tables:
+        cols = t["columns"]
         if "flat_row" in t:
             # aggregate table (e.g. NBIN): custom columns, one row of numbers, no Name column
-            fcols = t["columns"]
-            thead = "".join(f"<th>{c}</th>" for c in fcols)
-            tds = "".join(_num_cell(v, _tone_for(fcols[i]) or "plain") for i, v in enumerate(t["flat_row"]))
+            thead = "".join(f"<th>{c}</th>" for c in cols)
+            tds = "".join(_num_cell(v, _tone_for(cols[i]) or "plain") for i, v in enumerate(t["flat_row"]))
             body = f"<tr>{tds}</tr>"
         else:
-            cols = people_cols
-            thead = (f'<th class="l">{cols[0]}</th>' +
-                     "".join(f"<th>{c}</th>" for c in cols[1:]))
+            # people table: first column is Name (label), the rest are numbers coloured by header
+            has_name = bool(cols) and cols[0].lower() == "name"
+            thead = "".join(
+                f'<th class="{"l" if (i == 0 and has_name) else "r"}">{c}</th>' for i, c in enumerate(cols))
             rows_html = []
-            for r in t["rows"]:
-                rows_html.append('<tr>' + f'<td class="l">{r[0]}</td>' +
-                                 _num_cell(r[1], "in") + _num_cell(r[2], "out") + _num_cell(r[3], "out") + '</tr>')
-            tot = t["total"]
-            rows_html.append('<tr class="tot"><td class="l">Total</td>' +
-                             f'<td class="n">{tot[0]}</td><td class="n">{tot[1]}</td><td class="n">{tot[2]}</td></tr>')
+            for r in t.get("rows", []):
+                cells = []
+                for i, v in enumerate(r):
+                    if i == 0 and has_name:
+                        cells.append(f'<td class="l">{v}</td>')
+                    else:
+                        cells.append(_num_cell(v, _tone_for(cols[i]) or "plain"))
+                rows_html.append("<tr>" + "".join(cells) + "</tr>")
+            tot = t.get("total")
+            if tot:
+                cells = []
+                for i, v in enumerate(tot):
+                    cells.append(f'<td class="l">{v}</td>' if i == 0 else f'<td class="n">{v}</td>')
+                rows_html.append('<tr class="tot">' + "".join(cells) + "</tr>")
             body = "".join(rows_html)
         note = f'<div class="dnote">{t["note"]}</div>' if t.get("note") else ""
         parts.append(f'<div class="dcap">{t["title"]}<span class="badge">LIVE</span></div>'
                      f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{body}</tbody></table>{note}')
-    parts.append('<div class="dnote">Advisor Support (incl. NBIN) is live. Client Service, '
-                 'Account Services and Transfers are being wired next.</div>')
+    parts.append('<div class="dnote">Live from HubSpot. Client Service Dashboard and the Client '
+                 'Service NBIN "outside" column are report-only fields and are shown separately.</div>')
     parts.append('</div></div>')
     st.markdown("\n".join(parts), unsafe_allow_html=True)
 
