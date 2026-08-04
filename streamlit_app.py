@@ -14,10 +14,16 @@ import datetime as dt
 import os
 from zoneinfo import ZoneInfo
 
+import sys
+
 import pandas as pd
 import streamlit as st
 
-import reports
+try:                      # self-heal if the module cache is left corrupt by a rerun
+    import reports
+except KeyError:
+    sys.modules.pop("reports", None)
+    import reports
 
 TZ = ZoneInfo("America/Toronto")
 HERE = os.path.dirname(os.path.abspath(__file__))

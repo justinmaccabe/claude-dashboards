@@ -8,3 +8,11 @@ font = "serif"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# The local-sources file watcher re-imports modules on rerun and, under the
+# Streamlit Cloud runtime, intermittently corrupts sys.modules -> the app crashes
+# with "KeyError: 'reports'" at `import reports`. The watcher is pointless in
+# production (deploys come via git + reboot), so turn it off. This is the fix for
+# the board going down on the TV.
+fileWatcherType = "none"
