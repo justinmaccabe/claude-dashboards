@@ -30,7 +30,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "31Jul-nbin"
+BUILD = "04Aug-acctadmin"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -228,8 +228,58 @@ def _daily_data(_tok_tail: str):
              reports.build_today(hs, True), reports.build_today(hs, False),
              reports.build_open_outside(hs)),
         _advisor_support_nbin(hs),
+        _account_admin_nbin(hs),
     ]
     return tables, dt.datetime.now(dt.timezone.utc)
+
+
+def _find_list_id(hs, keywords):
+    """Find a ticket list whose name contains all `keywords` (case-insensitive)."""
+    data = hs._req("POST", "/crm/v3/lists/search", json={"query": keywords[0], "count": 100})
+    for l in data.get("lists", []):
+        name = (l.get("name") or "").lower()
+        if l.get("objectTypeId") == "0-5" and all(k in name for k in keywords):
+            return l.get("listId")
+    return None
+
+
+# Account-administration Request Types feeding report 6d.
+_ACCT_ADMIN_REQ_TYPES = [
+    "Update Account Documentation", "Modify banking", "Amend previous year tax returns",
+    "RESP Breakdown", "Tax Slip Corrections", "Update Phone Number", "Add banking",
+    "Delete banking", "Designation and change of beneficiary", "Client Consent Form",
+    "Add/Update POA", "Close Account", "Clerical Error Update", "Tax Slip Duplicates",
+    "Update SIN", "Update Entity", "Signature for Locked-In Agreements", "Update Address",
+    "Update Marital Status", "Update Email", "Estate Processing", "Book Value Adjustment",
+    "Change delivery method", "Update Name", "Third Party Contribution Authorization",
+    "RESP beneficiary information update", "Update DOB", "Recalculate LIF Maximum",
+    "Third party online access", "Update Account Legislation", "Password reset",
+]
+
+
+def _account_admin_nbin(hs):
+    """Account Administration Tickets with NBIN.
+    'Tickets With NBIN' = report 6d ("1 AND 2"): account-admin request types, Assigned to
+    != Optimize Administrator, Action Item Closed/Completed, Close date < 8 days ago,
+    Notification Sent to Assignee known. Verified vs HubSpot 2026-08-04 = 13.
+    'Completed Outside SLA' = report 6g, the list
+    'Outside SLA - Pending Confirmation (Account Administration)'."""
+    from hubspot_client import days_ago_ms
+    filters = [
+        {"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
+        {"propertyName": "assigned_to", "operator": "NOT_IN", "values": ["104417029"]},  # not Optimize Administrator
+        {"propertyName": "action_item", "operator": "IN", "values": ["Closed", "Completed"]},
+        {"propertyName": "closed_date", "operator": "GTE", "value": days_ago_ms(8)},
+        {"propertyName": "notification_sent_to_assignee", "operator": "HAS_PROPERTY"},
+    ]
+    with_nbin = len(hs.search(filters, ["request_type"]))
+    outside = 0
+    lid = _find_list_id(hs, ["outside sla", "pending confirmation", "account administration"])
+    if lid:
+        outside = len(hs.list_members(lid))
+    return {"title": "Account Administration Tickets with NBIN",
+            "columns": ["Tickets With NBIN", "Completed Outside SLA"],
+            "flat_row": [with_nbin, outside]}
 
 
 def _advisor_support_nbin(hs):
