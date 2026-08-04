@@ -36,7 +36,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "04Aug-acctadmin"
+BUILD = "04Aug-acctsvc"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -236,7 +236,105 @@ def _daily_data(_tok_tail: str):
         _advisor_support_nbin(hs),
         _account_admin_nbin(hs),
     ]
+    try:
+        tables.append(_account_services(hs))
+    except Exception as e:
+        tables.append({"title": "Account Services Dashboard",
+                       "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
+                       "rows": [], "total": ["Total", 0, 0, 0], "note": f"(temporarily unavailable: {e})"})
     return tables, dt.datetime.now(dt.timezone.utc)
+
+
+# --- Account Services Dashboard (reports 5c / 5e / 5f) -----------------------
+_AA_STAGES = [
+    ("date_entered_enhanced_review", "enhanced_review_sla_account_administration"),
+    ("date_entered_transmitted", "transmitted_sla_account_administration"),
+    ("date_entered_preparing_paperwork", "preparing_paperwork_sla_account_administration"),
+    ("date_entered_in_review_pending_action", "pending_action_sla_account_administration"),
+]
+_AA_READ = ["hubspot_owner_id", "portfolio_manager", "supervising_portfolio_manager",
+            "assigned_to_outside_sla", "assigned_to_within_sla", "assigned_to",
+            "total_time_with_nbin", "request_type",
+            "date_entered_in_process_support_ticket", "sent_to_nbin__date__time"]
+
+
+def _aa_report(hs, *, sla_value, date_mode, owner_checks, exclude_admin, total_time_clause,
+               segment_keywords, nbin_branch, attribution_field):
+    """One account-administration SLA report (5c/5e/5f), returned as {name: count}.
+    All clauses are stored ticket fields; see the report filter screenshots."""
+    from hubspot_client import today_bounds_ms, days_ago_ms, to_ms, to_num
+    ids = set()
+    for date_prop, sla_prop in _AA_STAGES:
+        f = [{"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
+             {"propertyName": sla_prop, "operator": "EQ", "value": sla_value}]
+        if date_mode == "today":
+            t0, t1 = today_bounds_ms()
+            f += [{"propertyName": date_prop, "operator": "GTE", "value": t0},
+                  {"propertyName": date_prop, "operator": "LT", "value": t1}]
+        else:  # "8days"
+            f += [{"propertyName": date_prop, "operator": "GTE", "value": days_ago_ms(8)}]
+        for r in hs.search(f, [date_prop]):
+            ids.add(str(r["id"]))
+    if segment_keywords:
+        lid = _find_list_id(hs, segment_keywords)
+        if lid:
+            ids.update(str(x) for x in hs.list_members(lid))
+    if nbin_branch:  # 5c clause 8: Time to Send to NBIN > 15 AND Pending Confirmation SLA = Outside
+        f = [{"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
+             {"propertyName": "pending_confirmation_sla_account_administration", "operator": "EQ", "value": "Outside SLA"},
+             {"propertyName": "sent_to_nbin__date__time", "operator": "HAS_PROPERTY"}]
+        for r in hs.search(f, ["date_entered_in_process_support_ticket", "sent_to_nbin__date__time"]):
+            a = to_ms(r.get("date_entered_in_process_support_ticket"))
+            b = to_ms(r.get("sent_to_nbin__date__time"))
+            if a is not None and b is not None and int((b - a) / 60000) > 15:
+                ids.add(str(r["id"]))
+    if not ids:
+        return {}
+    props = hs.batch_read(list(ids), _AA_READ)
+    id_to_name, _ = hs.owner_maps()
+    counts = {}
+    for p in props.values():
+        if p.get("request_type") not in _ACCT_ADMIN_REQ_TYPES:
+            continue
+        if exclude_admin and str(p.get("assigned_to")) == "104417029":
+            continue
+        if total_time_clause:
+            t = to_num(p.get("total_time_with_nbin"))
+            if t is not None and t > 2:      # keep only <= 2 days or empty
+                continue
+        aos = p.get("assigned_to_outside_sla")
+        if aos and any(str(p.get(of)) == str(aos) for of in owner_checks):
+            continue                          # Ticket Owner / PM / Supervising-PM check is True -> excluded
+        attr = p.get(attribution_field)
+        if not attr:
+            continue
+        nm = id_to_name.get(str(attr), str(attr))
+        counts[nm] = counts.get(nm, 0) + 1
+    return counts
+
+
+def _account_services(hs):
+    OWNER = "hubspot_owner_id"
+    PM = "portfolio_manager"
+    SPM = "supervising_portfolio_manager"
+    within = _aa_report(hs, sla_value="Within SLA", date_mode="today", owner_checks=[OWNER],
+                        exclude_admin=False, total_time_clause=False,
+                        segment_keywords=["account opening completed today", "within"],
+                        nbin_branch=False, attribution_field="assigned_to_within_sla")            # 5f
+    outside = _aa_report(hs, sla_value="Outside SLA", date_mode="today", owner_checks=[OWNER, PM, SPM],
+                         exclude_admin=True, total_time_clause=True,
+                         segment_keywords=["account opening completed today", "outside"],
+                         nbin_branch=False, attribution_field="assigned_to_outside_sla")           # 5e
+    open_outside = _aa_report(hs, sla_value="Outside SLA", date_mode="8days", owner_checks=[OWNER, PM, SPM],
+                              exclude_admin=True, total_time_clause=True,
+                              segment_keywords=None, nbin_branch=True,
+                              attribution_field="assigned_to_outside_sla")                          # 5c
+    names = sorted(set(within) | set(outside) | set(open_outside))
+    rows = [[n, within.get(n, 0), outside.get(n, 0), open_outside.get(n, 0)] for n in names]
+    total = ["Total", sum(within.values()), sum(outside.values()), sum(open_outside.values())]
+    return {"title": "Account Services Dashboard",
+            "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
+            "rows": rows, "total": total}
 
 
 def _find_list_id(hs, keywords):
@@ -425,8 +523,9 @@ def _render_daily_report():
             rows_html.append('<tr class="tot"><td class="l">Total</td>' +
                              f'<td class="n">{tot[0]}</td><td class="n">{tot[1]}</td><td class="n">{tot[2]}</td></tr>')
             body = "".join(rows_html)
+        note = f'<div class="dnote">{t["note"]}</div>' if t.get("note") else ""
         parts.append(f'<div class="dcap">{t["title"]}<span class="badge">LIVE</span></div>'
-                     f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{body}</tbody></table>')
+                     f'<table class="d"><thead><tr>{thead}</tr></thead><tbody>{body}</tbody></table>{note}')
     parts.append('<div class="dnote">Advisor Support (incl. NBIN) is live. Client Service, '
                  'Account Services and Transfers are being wired next.</div>')
     parts.append('</div></div>')
