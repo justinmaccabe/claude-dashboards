@@ -36,7 +36,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "04Aug-transfers"
+BUILD = "05Aug-4b-4f-4h"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -248,7 +248,223 @@ def _daily_data(_tok_tail: str):
         tables.append({"title": "Transfers (Pending Review)",
                        "columns": ["Name", "Tickets Outside SLA", "Pending Review — Due Today"],
                        "rows": [], "total": ["Total", 0, 0], "note": f"(temporarily unavailable: {e})"})
+    try:
+        tables.append(_client_service_dashboard(hs))
+    except Exception as e:
+        tables.append({"title": "Client Service Dashboard",
+                       "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
+                       "rows": [], "total": ["Total", 0, 0, 0], "note": f"(temporarily unavailable: {e})"})
     return tables, dt.datetime.now(dt.timezone.utc)
+
+
+# --- Client Service Dashboard: report 4b "Tickets Outside SLA" (full dataset tree) ----
+_CS_PIPELINES = ["82286254", "82318988", "145543234", "82088341", "82231167"]  # Transfer, Add Funds, New Accounts, Withdraw, Plans
+_ACS_ACTION_ITEMS = {"Enhanced Review", "Pending Action", "Pending Confirmation", "Transmitted",
+                     "Pending Final Review", "Account Opening", "Opening Account",
+                     "Amendments Required", "Pending Signature", "Pending paperwork"}
+_CLIENT_SIG_ROLES = ["Account Holder", "Annuitant", "Authorized Third Party", "Beneficiary", "Client",
+                     "Executor", "Individual of Authority", "Joint Relinquishing Plan Holder",
+                     "Joint Subscriber", "Legal Guardian", "Primary Caregiver", "Principal Beneficiary",
+                     "Receiving Account Holder", "Relinquishing Issuer", "Relinquishing Plan Holder",
+                     "Spouse", "Subscriber", "Trustee", "Witness"]
+_ADVISOR_SIG_ROLES = ["ID Verifier"]
+_PM_SIG_ROLES = ["Portfolio Manager", "Supervisor", "Authorized Supervisor", "Investment Advisor"]
+_4B_FIELDS = ["action_item", "hs_pipeline", "hs_pipeline_stage", "note_status", "follow_up_with",
+              "follow_up_date", "note_follow_up_date", "envelope_needs_to_sign", "sla_due_date",
+              "assigned_to", "hubspot_owner_id", "owner_config", "portfolio_manager",
+              "associate_portfolio_manager", "supervising_portfolio_manager", "request_type",
+              "action_item_sla", "assigned_to_outside_sla", "sent_to_nbin__date__time",
+              "date_entered_in_process_support_ticket"]
+
+
+def _cs_label_maps(hs):
+    data = hs._req("GET", "/crm/v3/pipelines/tickets").get("results", [])
+    pl, st = {}, {}
+    for p in data:
+        pl[str(p.get("id"))] = p.get("label")
+        for s in p.get("stages", []):
+            st[str(s.get("id"))] = s.get("label")
+    return pl, st
+
+
+def _4b_outside(hs):
+    """Report 4b — Client Service tickets currently Outside SLA. Full decomposition of the
+    12-clause dataset-field tree (see project doc 4b-client-service-dashboard-decomposition).
+    Returns {name: count} attributed by assigned_to_outside_sla."""
+    import datetime as _dt
+    from hubspot_client import to_ms, to_num
+    now_ms = int(_dt.datetime.now(_dt.timezone.utc).timestamp() * 1000)
+    pl_label, st_label = _cs_label_maps(hs)
+    id_to_name, _ = hs.owner_maps()
+
+    def has(text, subs):
+        t = text or ""
+        return any(s in t for s in subs)
+
+    def keep(p):
+        ai = p.get("action_item"); req = p.get("request_type")
+        # C6 (OR): request type carve-out
+        if req in ("Cancel / Correct", "Residual Transfer-In Sweep"):
+            return True
+        due = to_ms(p.get("sla_due_date"))
+        if due is None:
+            return False
+        # C1 Status = outside sla  (Hours Remaining = DATEDIFF HOUR now->due < 0)
+        if not (int((due - now_ms) / 3600000) < 0):
+            return False
+        if p.get("hs_pipeline") not in _CS_PIPELINES:                              # C8
+            return False
+        if (st_label.get(str(p.get("hs_pipeline_stage")), "") or "").strip() == "Trade Processing":  # C7
+            return False
+        if ai in ("Account Opening", "Opening Account"):                           # C9
+            return False
+        ns = p.get("note_status")
+        if not (ns in (None, "") or ns == "Closed"):                               # C5
+            return False
+        stn = to_ms(p.get("sent_to_nbin__date__time"))                             # C11
+        if stn is None:
+            c11 = True
+        else:
+            ep = to_ms(p.get("date_entered_in_process_support_ticket"))
+            c11 = ep is not None and int((stn - ep) / 60000) > 15
+        if not c11:
+            return False
+        if ai in ("Pending Confirmation", "Pending Final Review") and req == "Initiate a transfer":  # NOT C10
+            return False
+        if req == "Manage plan" and ai == "Pending Confirmation":                  # NOT C12
+            return False
+
+        ais = to_num(p.get("action_item_sla"))
+        sla_out = (ai != "Pending Final Review") and (ais != 0) and (now_ms > due)   # SLA Status Calculated == Outside SLA
+        env = p.get("envelope_needs_to_sign")
+
+        # C2 Pending Client Service > 0
+        if not ((ai in _ACS_ACTION_ITEMS) or has(env, ["Optimize Onboarding"])):
+            return False
+
+        # C3 Pending Client=0 AND Pending Advisor/PM=0 AND Pending Custodian=0
+        assigned, owner, oc = p.get("assigned_to"), p.get("hubspot_owner_id"), p.get("owner_config")
+        pending_client = has(env, _CLIENT_SIG_ROLES)
+        pend_adv = ((assigned and assigned == owner and oc in ("Config 2", "Config 3", "Config 4", "Config 5"))
+                    or has(env, _ADVISOR_SIG_ROLES) or (ns == "Open" and p.get("follow_up_with") == "Advisor"))
+        pend_pm = ((assigned and assigned in (p.get("associate_portfolio_manager"), p.get("portfolio_manager"),
+                                              p.get("supervising_portfolio_manager")))
+                   or has(env, _PM_SIG_ROLES) or (ns == "Open" and p.get("follow_up_with") == "Portfolio Manager"))
+        pending_custodian = (ai in ("Account Opening", "Opening Account")) or (ns == "Open" and p.get("follow_up_with") == "Custodian")
+        if pending_client or pend_adv or pend_pm or pending_custodian:
+            return False
+
+        # C4 all four follow-up-required flags = False
+        stagelbl = st_label.get(str(p.get("hs_pipeline_stage")), "") or ""
+        pipelbl = pl_label.get(str(p.get("hs_pipeline")), "") or ""
+        fud = to_ms(p.get("follow_up_date")); nfud = to_ms(p.get("note_follow_up_date"))
+        transfer_fu = (stagelbl == "Transfer Initiated" and ai == "Pending Confirmation"
+                       and ((fud is not None and fud <= now_ms) or (fud is None and sla_out)))
+        gen_fu = (stagelbl != "Transfer Initiated" and (fud is not None and fud <= now_ms) and sla_out)
+        open_note_fu = (pipelbl in ("Add Funds", "New Accounts") and (nfud is not None and nfud <= now_ms) and ns == "Open")
+        future_fu = ((stagelbl == "Transfer Initiated" and ai == "Pending Confirmation" and (fud is not None and fud > now_ms) and sla_out)
+                     or (stagelbl != "Transfer Initiated" and (fud is not None and fud > now_ms) and sla_out)
+                     or (pipelbl in ("Add Funds", "New Accounts") and ai == "Pending Final Review" and ns == "Open"
+                         and (nfud is not None and nfud > now_ms) and sla_out))
+        if transfer_fu or gen_fu or open_note_fu or future_fu:
+            return False
+        return True
+
+    counts, seen = {}, set()
+
+    def process(rows):
+        for p in rows:
+            tid = p.get("id")
+            if tid in seen:
+                continue
+            seen.add(tid)
+            if keep(p):
+                # 4b groups its rows by Assigned To (verified live 2026-08-05: Jay Suba =
+                # owner 86075206 = the assigned_to bucket). assigned_to_outside_sla is never
+                # populated on Client Service tickets, so it is NOT the breakdown field here.
+                attr = p.get("assigned_to")
+                if attr:
+                    nm = id_to_name.get(str(attr), str(attr))
+                    counts[nm] = counts.get(nm, 0) + 1
+
+    process(hs.search([{"propertyName": "hs_pipeline", "operator": "IN", "values": _CS_PIPELINES},
+                       {"propertyName": "sla_due_date", "operator": "LT", "value": now_ms},
+                       {"propertyName": "sla_due_date", "operator": "HAS_PROPERTY"}], _4B_FIELDS))
+    # Part B (clause 6 request-type carve-out) is scoped to the Client Service pipelines —
+    # NOT a blanket OR. Unscoped it would pull ~530 "Special Handling" tickets that live in
+    # the Account Administration pipeline (verified live 2026-08-05: 0 such tickets exist in
+    # the CS pipelines, so Part B contributes 0, but the scope keeps it correct if that changes).
+    process(hs.search([{"propertyName": "request_type", "operator": "IN",
+                        "values": ["Cancel / Correct", "Residual Transfer-In Sweep"]},
+                       {"propertyName": "hs_pipeline", "operator": "IN", "values": _CS_PIPELINES}],
+                      _4B_FIELDS))
+    return counts
+
+
+# Completed stages across the five Client Service pipelines (+ Transfer Out).
+_CS_COMPLETED_STAGES = ["187223990",   # Completed (Transfer Out)
+                        "154816395",   # Completed (Transfer)
+                        "154811555",   # Completed (Add Funds)
+                        "154790244",   # Completed (Withdraw)
+                        "154782076"]   # Completed (Plans)
+
+
+def _cs_completed(hs):
+    """Reports 4f (Completed Within SLA) and 4h (Completed Outside SLA), grouped by
+    Assigned to Processing. Both filters reproduced VERBATIM from the report panels
+    (verified live 2026-08-05) so the app equals the HubSpot tiles by construction:
+
+      Shared: Close date is Today (EDT) AND Ticket status IN the 5 Completed stages
+              AND Assigned to Processing is known.
+      4f clause 1 (OR): (overall_sla_within != false OR empty) OR (sla_status != 'outside sla' OR empty)
+                        => include unless (overall_sla_within == false AND sla_status == 'outside sla').
+      4h clause 1 (OR): (overall_sla_within != true OR empty) OR (sla_status == 'outside sla')
+                        => include if (overall_sla_within in {false, empty}) OR (sla_status == 'outside sla').
+      4h clause 5:      total_time_with_nbin <= 2 days OR is empty.
+
+    Note: sla_status is 'N/A' on essentially all completed tickets and total_time_with_nbin
+    is empty on all of them, so today 4f passes every completed ticket and 4h passes the
+    false/empty ones — exactly what the tiles compute. total_time_with_nbin has no populated
+    values to infer units from; the <= 2 comparison is treated as days (never binds today)."""
+    from hubspot_client import to_num, today_bounds_ms
+    t0, t1 = today_bounds_ms()
+    id_to_name, _ = hs.owner_maps()
+    rows = hs.search([{"propertyName": "hs_pipeline_stage", "operator": "IN", "values": _CS_COMPLETED_STAGES},
+                      {"propertyName": "closed_date", "operator": "GTE", "value": t0},
+                      {"propertyName": "closed_date", "operator": "LT", "value": t1},
+                      {"propertyName": "assigned_to_processing", "operator": "HAS_PROPERTY"}],
+                     ["overall_sla_within", "sla_status", "total_time_with_nbin", "assigned_to_processing"])
+    within, outside = {}, {}
+    for p in rows:
+        ov = (p.get("overall_sla_within") or "")           # "true" / "false" / ""
+        sla = p.get("sla_status")
+        sla_outside = (sla == "outside sla")
+        # 4f — Completed Within SLA (verbatim)
+        f_keep = not (ov == "false" and sla_outside)
+        # 4h — Completed Outside SLA (verbatim): clause 1 OR, then clause 5 NBIN gate
+        nbin = to_num(p.get("total_time_with_nbin"))
+        c5 = (nbin is None) or (nbin <= 2)
+        h_keep = ((ov in ("false", "")) or sla_outside) and c5
+        attr = p.get("assigned_to_processing")
+        if not attr:
+            continue
+        nm = id_to_name.get(str(attr), str(attr))
+        if f_keep:
+            within[nm] = within.get(nm, 0) + 1
+        if h_keep:
+            outside[nm] = outside.get(nm, 0) + 1
+    return within, outside
+
+
+def _client_service_dashboard(hs):
+    open_outside = _4b_outside(hs)        # report 4b  -> Tickets Outside SLA (by Assigned To)
+    within, outside = _cs_completed(hs)   # reports 4f / 4h (by Assigned to Processing)
+    names = sorted(set(within) | set(outside) | set(open_outside))
+    rows = [[n, within.get(n, 0), outside.get(n, 0), open_outside.get(n, 0)] for n in names]
+    total = ["Total", sum(within.values()), sum(outside.values()), sum(open_outside.values())]
+    return {"title": "Client Service Dashboard",
+            "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
+            "rows": rows, "total": total}
 
 
 def _transfers(hs):
