@@ -36,7 +36,7 @@ INK = "#FFFFFF"
 MUTED = "#9CB0C2"
 
 # Bump on each deploy so the live build is verifiable on-screen (footer/clock).
-BUILD = "05Aug-4b-4f-4h"
+BUILD = "18Aug-final"
 
 # Combined (split-screen) views compose two single boards side by side.
 COMBINED = {
@@ -254,6 +254,17 @@ def _daily_data(_tok_tail: str):
         tables.append({"title": "Client Service Dashboard",
                        "columns": ["Name", "Completed Within SLA", "Completed Outside SLA", "Tickets Outside SLA"],
                        "rows": [], "total": ["Total", 0, 0, 0], "note": f"(temporarily unavailable: {e})"})
+    # Drop test/demo owners (e.g. "Transition Demo") from any people table; recompute totals.
+    for _t in tables:
+        _rows = _t.get("rows")
+        if not _rows:
+            continue
+        _kept = [r for r in _rows if str(r[0]) not in {"Transition Demo"}]
+        if len(_kept) != len(_rows):
+            _t["rows"] = _kept
+            _ncol = len(_t["columns"]) if _t.get("columns") else len(_kept[0]) if _kept else 0
+            if _t.get("total") and _ncol:
+                _t["total"] = ["Total"] + [sum(r[i] for r in _kept) for i in range(1, _ncol)]
     return tables, dt.datetime.now(dt.timezone.utc)
 
 
@@ -529,7 +540,7 @@ def _aa_report(hs, *, sla_value, date_mode, owner_checks, exclude_admin, total_t
                segment_keywords, nbin_branch, attribution_field):
     """One account-administration SLA report (5c/5e/5f), returned as {name: count}.
     All clauses are stored ticket fields; see the report filter screenshots."""
-    from hubspot_client import today_bounds_ms, days_ago_ms, to_ms, to_num
+    from hubspot_client import today_bounds_ms, to_ms, to_num
     ids = set()
     for date_prop, sla_prop in _AA_STAGES:
         f = [{"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
@@ -538,8 +549,8 @@ def _aa_report(hs, *, sla_value, date_mode, owner_checks, exclude_admin, total_t
             t0, t1 = today_bounds_ms()
             f += [{"propertyName": date_prop, "operator": "GTE", "value": t0},
                   {"propertyName": date_prop, "operator": "LT", "value": t1}]
-        else:  # "8days"
-            f += [{"propertyName": date_prop, "operator": "GTE", "value": days_ago_ms(8)}]
+        else:  # "8days" -> HubSpot 'less than 8 days ago (EDT)' = EDT-midnight boundary
+            f += [{"propertyName": date_prop, "operator": "GTE", "value": _days_ago_edt_midnight(8)}]
         for r in hs.search(f, [date_prop]):
             ids.add(str(r["id"]))
     if segment_keywords:
@@ -628,26 +639,48 @@ _ACCT_ADMIN_REQ_TYPES = [
 ]
 
 
+def _days_ago_edt_midnight(days):
+    """HubSpot 'is less than N days ago (EDT)' rounds to the EDT day boundary, NOT a
+    rolling now-N*24h window. So floor to today's EDT midnight, then subtract N days.
+    (Verified 2026-08-18: report 6d = 55 with this boundary vs 46 with rolling.)"""
+    import datetime as _dt
+    from hubspot_client import TZ
+    start = _dt.datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    d = start - _dt.timedelta(days=days)
+    return int(d.astimezone(_dt.timezone.utc).timestamp() * 1000)
+
+
 def _account_admin_nbin(hs):
     """Account Administration Tickets with NBIN.
     'Tickets With NBIN' = report 6d ("1 AND 2"): account-admin request types, Assigned to
-    != Optimize Administrator, Action Item Closed/Completed, Close date < 8 days ago,
-    Notification Sent to Assignee known. Verified vs HubSpot 2026-08-04 = 13.
+    != Optimize Administrator, Action Item Closed/Completed, Close date is less than 8 days
+    ago (EDT day boundary), Notification Sent to Assignee known. Verified vs HubSpot
+    2026-08-18 = 55.
     'Completed Outside SLA' = report 6g, the list
     'Outside SLA - Pending Confirmation (Account Administration)'."""
-    from hubspot_client import days_ago_ms
     filters = [
         {"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
         {"propertyName": "assigned_to", "operator": "NOT_IN", "values": ["104417029"]},  # not Optimize Administrator
         {"propertyName": "action_item", "operator": "IN", "values": ["Closed", "Completed"]},
-        {"propertyName": "closed_date", "operator": "GTE", "value": days_ago_ms(8)},
+        {"propertyName": "closed_date", "operator": "GTE", "value": _days_ago_edt_midnight(8)},
         {"propertyName": "notification_sent_to_assignee", "operator": "HAS_PROPERTY"},
     ]
     with_nbin = len(hs.search(filters, ["request_type"]))
-    outside = 0
-    lid = _find_list_id(hs, ["outside sla", "pending confirmation", "account administration"])
-    if lid:
-        outside = len(hs.list_members(lid))
+    # 6g = report "Outside SLA - Pending Confirmation (Account Administration)".
+    # Reproduced live from stored fields (verified vs HubSpot 2026-08-18 = 30), replacing the
+    # old list dependency: the segment is Account Administration pipeline + Action Item
+    # 'Pending Confirmation' + Time in Current Action Item > 2 days (rolling elapsed, so
+    # date_entered_current_action_item < now-2d); the report then intersects that with the
+    # account-admin request types AND Ticket status not 'Completed (Account Administration)'.
+    import datetime as _dt
+    now2 = int((_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=2)).timestamp() * 1000)
+    outside = len(hs.search([
+        {"propertyName": "hs_pipeline", "operator": "EQ", "value": "82170383"},
+        {"propertyName": "action_item", "operator": "EQ", "value": "Pending Confirmation"},
+        {"propertyName": "date_entered_current_action_item", "operator": "LT", "value": now2},
+        {"propertyName": "request_type", "operator": "IN", "values": _ACCT_ADMIN_REQ_TYPES},
+        {"propertyName": "hs_pipeline_stage", "operator": "NEQ", "value": "154789384"},  # Completed (Account Administration)
+    ], ["request_type"]))
     return {"title": "Account Administration Tickets with NBIN",
             "columns": ["Tickets With NBIN", "Completed Outside SLA"],
             "flat_row": [with_nbin, outside]}
